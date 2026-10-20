@@ -6,77 +6,31 @@ use tokio::{
 };
 
 pub async fn start(app: &App, name: &str) -> Result<Status> {
-    let _operation = app
+    let operation = app
         .save_operations
-        .try_lock()
+        .clone()
+        .try_lock_owned()
         .map_err(|_| Error::conflict("A save operation is in progress"))?;
-    let mut inner = app.inner.lock().await;
-    if inner.child.is_some() {
-        return Err(Error::conflict("The server is already active"));
-    }
-    let save = storage::save_path(&app.saves_path(), name)?;
-    if !save.is_file() {
-        return Err(Error::bad("The selected save does not exist"));
-    }
-    let binary = app
-        .binary
-        .as_ref()
-        .ok_or_else(|| Error::bad("Configure FC_FACTORIO_BIN before starting a server"))?;
-    crate::mods::workflows::ensure_consistent(app)?;
-    if let Some(version) = inner.status.version.as_deref() {
-        crate::mods::validate_start(app, version)?;
-    }
-    let settings = storage::settings(&app.settings_path())?;
-    let auto_pause = settings.settings.auto_pause;
-    storage::update_settings(&app.settings_path(), settings)?;
-    let session = telemetry::Session::new(auto_pause)?;
-    let mut redactions = storage::log_redactions(&app.settings_path())?;
-    redactions.push(session.redaction());
-    let redactions = std::sync::Arc::new(redactions);
-    let admins = storage::admins(&app.admins_path())?;
-    if admins.revision == "missing" {
-        storage::update_admins(&app.admins_path(), admins)?;
-    }
-    // Factorio writes runtime files below the managed data directory.
-    let config = app.directory.join("config.ini");
-    storage::ensure_regular(&config)?;
-    if !config.exists() {
-        let data = app
-            .directory
-            .to_str()
-            .ok_or_else(|| Error::bad("Data directory must be UTF-8"))?;
-        if data.contains(['\r', '\n']) {
-            return Err(Error::bad("Data directory contains a newline"));
+    let mod_operation = app.mod_operations.clone().lock_owned().await;
+    let version = {
+        let inner = app.inner.lock().await;
+        if inner.child.is_some() {
+            return Err(Error::conflict("The server is already active"));
         }
-        let contents =
-            format!("[path]\nread-data=__PATH__executable__/../../data\nwrite-data={data}\n");
-        storage::atomic_write(&config, contents.as_bytes(), false)?;
-    }
-    std::fs::create_dir_all(app.directory.join("mods"))?;
-    storage::ensure_directory(&app.directory.join("mods"))?;
-    let manager = storage::manager_settings(&app.manager_settings_path())?.settings;
-    let mut command = Command::new(binary);
-    session.configure(&mut command);
-    command
-        .current_dir(&app.directory)
-        .args(["--start-server"])
-        .arg(save)
-        .arg("--bind")
-        .arg(manager.game_bind_address)
-        .arg("--port")
-        .arg(manager.game_port.to_string())
-        .arg("--mod-directory")
-        .arg(app.directory.join("mods"))
-        .arg("--server-settings")
-        .arg(app.settings_path())
-        .arg("--server-adminlist")
-        .arg(app.admins_path())
-        .arg("--config")
-        .arg(config)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        inner.status.version.clone()
+    };
+    let preparation_app = app.clone();
+    let save_name = name.to_owned();
+    let (mut command, session, redactions, _operation, _mod_operation) =
+        tokio::task::spawn_blocking(move || {
+            let prepared = prepare_start(&preparation_app, &save_name, version.as_deref());
+            prepared.map(|(command, session, redactions)| {
+                (command, session, redactions, operation, mod_operation)
+            })
+        })
+        .await
+        .map_err(|_| Error::bad("Server preparation failed"))??;
+    let mut inner = app.inner.lock().await;
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -122,6 +76,89 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
     inner.status.error = None;
     log(&mut inner, LogLevel::Info, format!("Starting {name}"));
     Ok(inner.status.clone())
+}
+type PreparedStart = (Command, telemetry::Session, std::sync::Arc<Vec<String>>);
+
+fn prepare_start(app: &App, name: &str, version: Option<&str>) -> Result<PreparedStart> {
+    let save = storage::save_path(&app.saves_path(), name)?;
+    if !save.is_file() {
+        return Err(Error::bad("The selected save does not exist"));
+    }
+    let binary = app
+        .binary
+        .as_ref()
+        .ok_or_else(|| Error::bad("Configure FC_FACTORIO_BIN before starting a server"))?;
+    crate::mods::workflows::ensure_consistent(app)?;
+    if let Some(version) = version {
+        crate::mods::validate_start(app, version)?;
+    }
+    let settings = storage::settings(&app.settings_path())?;
+    let auto_pause = settings.settings.auto_pause;
+    storage::update_settings(&app.settings_path(), settings)?;
+    let session = telemetry::Session::new(auto_pause)?;
+    let mut redactions = storage::log_redactions(&app.settings_path())?;
+    redactions.push(session.redaction());
+    let admins = storage::admins(&app.admins_path())?;
+    if admins.revision == "missing" {
+        storage::update_admins(&app.admins_path(), admins)?;
+    }
+    let config = app.directory.join("config.ini");
+    storage::ensure_regular(&config)?;
+    if !config.exists() {
+        let data = app
+            .directory
+            .to_str()
+            .ok_or_else(|| Error::bad("Data directory must be UTF-8"))?;
+        if data.contains(['\r', '\n']) {
+            return Err(Error::bad("Data directory contains a newline"));
+        }
+        storage::atomic_write(
+            &config,
+            format!("[path]\nread-data=__PATH__executable__/../../data\nwrite-data={data}\n")
+                .as_bytes(),
+            false,
+        )?;
+    }
+    std::fs::create_dir_all(app.directory.join("mods"))?;
+    storage::ensure_directory(&app.directory.join("mods"))?;
+    let manager = storage::manager_settings(&app.manager_settings_path())?.settings;
+    let whitelist = app.directory.join("server-whitelist.json");
+    let banlist = app.directory.join("server-banlist.json");
+    storage::validate_whitelist_choice(&app.manager_settings_path(), &whitelist)?;
+    storage::prepare_player_lists(&whitelist, &banlist, manager.use_server_whitelist)?;
+    let mut command = Command::new(binary);
+    session.configure(&mut command);
+    command
+        .current_dir(&app.directory)
+        .arg("--start-server")
+        .arg(save)
+        .arg("--bind")
+        .arg(manager.game_bind_address)
+        .arg("--port")
+        .arg(manager.game_port.to_string())
+        .arg("--mod-directory")
+        .arg(app.directory.join("mods"))
+        .arg("--server-settings")
+        .arg(app.settings_path())
+        .arg("--server-adminlist")
+        .arg(app.admins_path())
+        .arg("--server-whitelist")
+        .arg(whitelist)
+        .arg("--use-server-whitelist")
+        .arg(if manager.use_server_whitelist {
+            "true"
+        } else {
+            "false"
+        })
+        .arg("--server-banlist")
+        .arg(banlist)
+        .arg("--config")
+        .arg(config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    Ok((command, session, std::sync::Arc::new(redactions)))
 }
 pub async fn stop(app: &App) -> Result<Status> {
     let mut inner = app.inner.lock().await;
@@ -281,14 +318,6 @@ async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64, redac
             .telemetry
             .activity(telemetry::ActivityKind::Started, "Server started".into());
     }
-    if inner.generation == generation
-        && let Some((_, rest)) = original.split_once("Factorio ")
-        && let Some(version) = rest.split_whitespace().next()
-        && version.chars().all(|c| c.is_ascii_digit() || c == '.')
-        && version.contains('.')
-    {
-        inner.status.version = Some(version.into());
-    }
     log(&mut inner, level, message);
 }
 async fn pump(
@@ -360,11 +389,13 @@ pub async fn start_selected(app: &App, name: Option<&str>) -> Result<Status> {
     let name = match name {
         Some(name) => name.to_owned(),
         None => {
-            let _inner = app.inner.lock().await;
-            storage::selected_save(
-                &storage::save_selection(&app.save_selection_path())?,
-                &app.saves_path(),
-            )?
+            app.mod_storage(|app| {
+                storage::selected_save(
+                    &storage::save_selection(&app.save_selection_path())?,
+                    &app.saves_path(),
+                )
+            })
+            .await?
         }
     };
     start(app, &name).await
@@ -405,40 +436,45 @@ pub fn validate_command(input: &ConsoleCommandRequest) -> Result<()> {
 }
 pub async fn send_command(app: &App, input: ConsoleCommandRequest) -> Result<CommandResponse> {
     validate_command(&input)?;
-    let mut inner = app.inner.lock().await;
-    if !matches!(
-        inner.status.state,
-        ServerState::Running | ServerState::Paused
-    ) {
-        return Err(Error::conflict("Commands require a running server"));
-    }
-    let stdin = inner
-        .child
-        .as_mut()
-        .and_then(|child| child.stdin.as_mut())
-        .ok_or_else(|| Error::conflict("Server console is unavailable"))?;
+    let (mut stdin, generation) = {
+        let mut inner = app.inner.lock().await;
+        if !matches!(
+            inner.status.state,
+            ServerState::Running | ServerState::Paused
+        ) {
+            return Err(Error::conflict("Commands require a running server"));
+        }
+        let stdin = inner
+            .child
+            .as_mut()
+            .and_then(|child| child.stdin.take())
+            .ok_or_else(|| {
+                Error::conflict("Server console is unavailable or another command is pending")
+            })?;
+        (stdin, inner.generation)
+    };
     let line = format!("{}\n", input.command);
-    match tokio::time::timeout(Duration::from_secs(2), stdin.write_all(line.as_bytes())).await {
-        Ok(Ok(())) => Ok(CommandResponse { accepted: true }),
-        Ok(Err(_)) => {
-            if let Some(child) = inner.child.as_mut() {
-                child.stdin.take();
+    let result =
+        tokio::time::timeout(Duration::from_secs(2), stdin.write_all(line.as_bytes())).await;
+    match result {
+        Ok(Ok(())) => {
+            let mut inner = app.inner.lock().await;
+            if inner.generation == generation
+                && let Some(child) = inner.child.as_mut()
+            {
+                child.stdin = Some(stdin);
             }
-            Err(Error::conflict(
-                "Unable to write to the server console; restart before sending commands",
-            ))
+            Ok(CommandResponse { accepted: true })
         }
-        Err(_) => {
-            // A timed out write may be partial; prevent a later command from completing it.
-            if let Some(child) = inner.child.as_mut() {
-                child.stdin.take();
-            }
-            Err(Error::conflict(
-                "Server console write timed out; restart the server before sending commands",
-            ))
-        }
+        Ok(Err(_)) => Err(Error::conflict(
+            "Unable to write to the server console; restart before sending commands",
+        )),
+        Err(_) => Err(Error::conflict(
+            "Server console write timed out; restart the server before sending commands",
+        )),
     }
 }
+
 pub async fn force_stop(app: &App, confirm: bool) -> Result<Status> {
     if !confirm {
         return Err(Error::bad(
@@ -464,21 +500,30 @@ pub async fn force_stop(app: &App, confirm: bool) -> Result<Status> {
     Ok(inner.status.clone())
 }
 pub async fn create_save(app: &App, name: &str) -> Result<Save> {
-    let _operation = app
+    let operation = app
         .save_operations
-        .try_lock()
+        .clone()
+        .try_lock_owned()
         .map_err(|_| Error::conflict("A save operation is in progress"))?;
-    let temporary = {
+    let mod_operation = app.mod_operations.clone().lock_owned().await;
+    let version = {
         let inner = app.inner.lock().await;
         if inner.child.is_some() {
             return Err(Error::conflict("Stop the server before creating a save"));
         }
+        inner.status.version.clone()
+    };
+    let preparation_app = app.clone();
+    let save_name = name.to_owned();
+    let (temporary, _operation, _mod_operation) = tokio::task::spawn_blocking(move || {
+        let app = &preparation_app;
+        let name = save_name.as_str();
         let destination = storage::save_path(&app.saves_path(), name)?;
         if destination.exists() {
             return Err(Error::conflict("A save with that name already exists"));
         }
         crate::mods::workflows::ensure_consistent(app)?;
-        if let Some(version) = inner.status.version.as_deref() {
+        if let Some(version) = version.as_deref() {
             crate::mods::validate_start(app, version)?;
         }
         let temporary = tempfile::Builder::new()
@@ -514,8 +559,10 @@ pub async fn create_save(app: &App, name: &str) -> Result<Save> {
                 .as_bytes(),
             false,
         )?;
-        temporary
-    };
+        Ok::<_, Error>((temporary, operation, mod_operation))
+    })
+    .await
+    .map_err(|_| Error::bad("World preparation failed"))??;
     let binary = app
         .binary
         .as_ref()
@@ -546,22 +593,76 @@ pub async fn create_save(app: &App, name: &str) -> Result<Save> {
             "Factorio could not create the world ({exit})"
         )));
     }
-    storage::ensure_regular(&output)?;
-    let mut file = std::fs::File::open(&output)?;
-    if file.metadata()?.len() > storage::MAX_SAVE_BYTES {
-        return Err(Error::bad("Created world exceeds 1 GiB"));
-    }
-    storage::validate_save_reader(&mut file)?;
-    file.sync_all()?;
-    let _inner = app.inner.lock().await;
-    let destination = storage::save_path(&app.saves_path(), name)?;
-    std::fs::hard_link(&output, destination).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::conflict("A save with that name already exists")
-        } else {
-            error.into()
+    let final_app = app.clone();
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _temporary = temporary;
+        let _operation = _operation;
+        let _mod_operation = _mod_operation;
+        storage::ensure_regular(&output)?;
+        let mut file = std::fs::File::open(&output)?;
+        if file.metadata()?.len() > storage::MAX_SAVE_BYTES {
+            return Err(Error::bad("Created world exceeds 1 GiB"));
         }
-    })?;
-    std::fs::File::open(app.saves_path())?.sync_all()?;
-    storage::save_info(&app.saves_path(), name)
+        storage::validate_save_reader(&mut file)?;
+        file.sync_all()?;
+        let destination = storage::save_path(&final_app.saves_path(), &name)?;
+        std::fs::hard_link(&output, destination).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                Error::conflict("A save with that name already exists")
+            } else {
+                error.into()
+            }
+        })?;
+        std::fs::File::open(final_app.saves_path())?.sync_all()?;
+        storage::save_info(&final_app.saves_path(), &name)
+    })
+    .await
+    .map_err(|_| Error::bad("World publication failed"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn process_output_never_changes_trusted_engine_version() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = App::new(dir.path().into(), None)?;
+        for state in [
+            ServerState::Starting,
+            ServerState::Running,
+            ServerState::Paused,
+            ServerState::Stopped,
+        ] {
+            {
+                let mut inner = app.inner.lock().await;
+                inner.status.version = Some("2.1.23".into());
+                inner.status.state = state;
+            }
+            for line in [
+                "[CHAT] player: Factorio 1.1",
+                "[CHAT] player: Factorio 2.0.0 (build 12345)",
+                "0.000 Factorio 9.9.9 (build 99999, linux64, headless)",
+                "Warning mod.lua: Factorio 1.1",
+            ] {
+                record(&app, LogLevel::Info, line.as_bytes(), 0, &[]).await;
+                assert_eq!(
+                    app.inner.lock().await.status.version.as_deref(),
+                    Some("2.1.23")
+                );
+            }
+        }
+        app.inner.lock().await.status.version = None;
+        record(
+            &app,
+            LogLevel::Info,
+            b"[CHAT] player: Factorio 2.1.23",
+            0,
+            &[],
+        )
+        .await;
+        assert!(app.inner.lock().await.status.version.is_none());
+        Ok(())
+    }
 }

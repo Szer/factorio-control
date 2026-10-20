@@ -443,6 +443,11 @@ impl Auth {
     }
 
     pub async fn validate_bind(&self, bind: SocketAddr) -> Result<()> {
+        if self.public_origin.is_some() && self.trusted_proxies.is_empty() {
+            return Err(Error::bad(
+                "Public HTTPS deployments require explicit FC_TRUSTED_PROXIES; configure the actual reverse-proxy addresses and restrict ingress",
+            ));
+        }
         if !bind.ip().is_loopback() {
             let mut runtime = self.inner.lock().await;
             self.refresh(&mut runtime)?;

@@ -76,11 +76,15 @@ pub struct Session {
     address: SocketAddr,
     password: String,
     auto_pause: bool,
+    research_watch: std::sync::Arc<std::sync::Mutex<Vec<Research>>>,
 }
 impl Session {
     pub fn new(auto_pause: bool) -> Result<Self> {
-        let socket = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let address = socket.local_addr()?;
+        let port = std::env::var("FC_RCON_PORT")
+            .unwrap_or_else(|_| "27015".into())
+            .parse::<std::num::NonZeroU16>()
+            .map_err(|_| Error::bad("FC_RCON_PORT must be 1–65535"))?;
+        let address = SocketAddr::from(([127, 0, 0, 1], port.get()));
         let mut random = [0_u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
         let password = random.iter().map(|b| format!("{b:02x}")).collect();
@@ -88,6 +92,7 @@ impl Session {
             address,
             password,
             auto_pause,
+            research_watch: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
     pub fn configure(&self, command: &mut tokio::process::Command) {
@@ -319,6 +324,8 @@ struct WireSample {
     research: Vec<Research>,
     #[serde(deserialize_with = "array_or_empty_table")]
     completed: Vec<Completed>,
+    #[serde(default, deserialize_with = "array_or_empty_table")]
+    watch: Vec<Research>,
 }
 fn array_or_empty_table<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
 where
@@ -348,8 +355,47 @@ fn measured_ups(previous: &WireSample, current: &WireSample, elapsed: Duration) 
         .checked_sub(previous.tick)
         .map(|ticks| ticks as f64 / elapsed.as_secs_f64())
 }
-fn sample_command() -> &'static str {
-    "/sc local p={}; for _,v in pairs(game.connected_players) do p[#p+1]=v.name end; local r={}; local c={}; for _,f in pairs(game.forces) do if f.current_research then r[#r+1]={force=f.name,name=f.current_research.name,progress=f.research_progress,level=f.current_research.level} end; for _,t in pairs(f.technologies) do c[#c+1]={force=f.name,name=t.name,level=t.level,researched=t.researched} end end; rcon.print(helpers.table_to_json({tick=game.tick,speed=game.speed,paused=game.tick_paused,players=p,research=r,completed=c}))"
+fn lua_string(value: &str) -> String {
+    let escaped = value
+        .bytes()
+        .map(|byte| format!("\\{byte:03}"))
+        .collect::<String>();
+    format!("\"{escaped}\"")
+}
+fn sample_command(watched: &[Research]) -> Result<String> {
+    if watched.len() > 1024
+        || watched
+            .iter()
+            .any(|r| r.force.len() > 1024 || r.name.len() > 1024)
+    {
+        return Err(Error::bad("Too many research entries for telemetry"));
+    }
+    let mut by_force = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    for research in watched {
+        by_force
+            .entry(&research.force)
+            .or_default()
+            .push(&research.name);
+    }
+    let watched = by_force
+        .into_iter()
+        .map(|(force, names)| {
+            let names = names
+                .into_iter()
+                .map(|name| format!("[{}]=true", lua_string(name)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{}]={{{names}}}", lua_string(force))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let command = format!(
+        "/sc local w={{{watched}}}; local p={{}}; for _,v in pairs(game.connected_players) do p[#p+1]=v.name end; local r={{}}; local c={{}}; local next={{}}; for _,f in pairs(game.forces) do local names=w[f.name] or {{}}; local active={{}}; if f.current_research then r[#r+1]={{force=f.name,name=f.current_research.name,progress=f.research_progress,level=f.current_research.level}}; active[f.current_research.name]=true end; for _,q in pairs(f.research_queue or {{}}) do active[q.name]=true end; for name,_ in pairs(active) do names[name]=true; local t=f.technologies[name]; if t then next[#next+1]={{force=f.name,name=t.name,progress=0,level=t.level}} end end; for name,_ in pairs(names) do local t=f.technologies[name]; if t then c[#c+1]={{force=f.name,name=t.name,level=t.level,researched=t.researched}} end end end; rcon.print(helpers.table_to_json({{tick=game.tick,speed=game.speed,paused=game.tick_paused,players=p,research=r,completed=c,watch=next}}))"
+    );
+    if command.len() > 65526 {
+        return Err(Error::bad("Research telemetry command exceeds RCON limit"));
+    }
+    Ok(command)
 }
 pub async fn run(app: App, generation: u64) {
     loop {
@@ -458,7 +504,14 @@ async fn connect(session: &Session) -> Result<TcpStream> {
 }
 async fn read_sample(session: &Session) -> Result<WireSample> {
     let mut stream = connect(session).await?;
-    send_packet(&mut stream, 2, 2, sample_command()).await?;
+    let command = {
+        let watched = session
+            .research_watch
+            .lock()
+            .map_err(|_| Error::bad("Research tracking unavailable"))?;
+        sample_command(&watched)?
+    };
+    send_packet(&mut stream, 2, 2, &command).await?;
     let mut output = Vec::new();
     for _ in 0..256 {
         let (id, kind, body) = read_packet(&mut stream).await?;
@@ -485,6 +538,14 @@ async fn read_sample(session: &Session) -> Result<WireSample> {
                 }
                 // Empty-server auto-pause is separate from game.tick_paused.
                 sample.paused |= session.auto_pause && sample.players.is_empty();
+                if sample.watch.len() > 1024 {
+                    return Err(Error::bad("Too many active research entries for telemetry"));
+                }
+                *session
+                    .research_watch
+                    .lock()
+                    .map_err(|_| Error::bad("Research tracking unavailable"))? =
+                    sample.watch.clone();
                 return Ok(sample);
             }
             if output.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
@@ -535,7 +596,23 @@ mod tests {
             players: Vec::new(),
             research: Vec::new(),
             completed: Vec::new(),
+            watch: Vec::new(),
         }
+    }
+    #[test]
+    fn research_query_is_bounded_and_escapes_untrusted_names() -> Result<()> {
+        let watched = vec![Research {
+            force: "a\";error('injected')".into(),
+            name: "tech\\name".into(),
+            progress: 0.5,
+            level: 1,
+        }];
+        let command = sample_command(&watched)?;
+        assert!(!command.contains("pairs(f.technologies)"));
+        assert!(!command.contains("error('injected')"));
+        assert!(sample_command(&vec![watched[0].clone(); 1025]).is_err());
+        assert_eq!(lua_string("a\""), "\"\\097\\034\"");
+        Ok(())
     }
     #[test]
     fn measures_real_elapsed_time_and_never_confuses_pause_with_zero() {
@@ -700,7 +777,20 @@ mod tests {
         let mut settings = storage::settings(&app.settings_path()).map_err(io)?;
         settings.settings.auto_pause = false;
         storage::update_settings(&app.settings_path(), settings).map_err(io)?;
+        let config = app.directory.join("create.ini");
+        storage::atomic_write(
+            &config,
+            format!(
+                "[path]\nread-data=__PATH__executable__/../../data\nwrite-data={}\n",
+                app.directory.display()
+            )
+            .as_bytes(),
+            false,
+        )
+        .map_err(io)?;
         let output = tokio::process::Command::new(&binary)
+            .arg("--config")
+            .arg(&config)
             .arg("--create")
             .arg(app.saves_path().join("test.zip"))
             .output()
@@ -743,6 +833,31 @@ mod tests {
         );
         let mut runtime = Runtime::default();
         runtime.accept(researching, Instant::now(), 10);
+        for _ in 0..8 {
+            script(&session, "game.forces.player.research_queue={}")
+                .await
+                .map_err(io)?;
+            let canceled = read_sample(&session).await.map_err(io)?;
+            assert!(
+                canceled.watch.is_empty(),
+                "Canceled entries must not accumulate in later polls"
+            );
+            assert!(
+                session
+                    .research_watch
+                    .lock()
+                    .map_err(|_| std::io::Error::other("watch lock"))?
+                    .is_empty()
+            );
+            script(
+                &session,
+                "assert(game.forces.player.add_research('automation'))",
+            )
+            .await
+            .map_err(io)?;
+            let resumed = read_sample(&session).await.map_err(io)?;
+            assert_eq!(resumed.watch.len(), 1);
+        }
         script(
             &session,
             "game.forces.player.technologies.automation.researched=true",

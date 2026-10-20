@@ -81,7 +81,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let authentication = auth::Auth::load_with_trusted_proxies(
         &app.directory,
         public_url.as_deref(),
-        trusted_proxies.as_deref(),
+        trusted_proxies
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
     )
     .map_err(|error| error.message)?;
     authentication

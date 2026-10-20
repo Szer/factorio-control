@@ -457,6 +457,18 @@ async fn public_origin_and_loopback_modes_reject_cross_origin_requests() -> Test
         StatusCode::FORBIDDEN
     );
     let public = Auth::load(temp.path(), Some("https://panel.example")).map_err(|e| e.message)?;
+    assert!(
+        public
+            .validate_bind("0.0.0.0:9400".parse::<SocketAddr>()?)
+            .await
+            .is_err()
+    );
+    let public = Auth::load_with_trusted_proxies(
+        temp.path(),
+        Some("https://panel.example"),
+        Some("192.0.2.10"),
+    )
+    .map_err(|e| e.message)?;
     public
         .validate_bind("0.0.0.0:9400".parse::<SocketAddr>()?)
         .await
