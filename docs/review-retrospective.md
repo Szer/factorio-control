@@ -11,11 +11,11 @@ The review exposes missing behavioral coverage across trust boundaries, concurre
 | Unrealistic resource fixtures | Tiny ZIPs do not exercise real asset sizes, streaming or async worker starvation. | Chunked 70 MiB mod and 200 MiB save uploads, bounded archive validation and slow export barriers. |
 | Recovery specified as rejection | Preserving an error is weaker than recovering an interrupted operation. | Restart, retry and every mutating entry point recover valid journals; malformed journals fail closed. |
 | Function tests bypass routing | A valid operation can be unreachable because a static route shadows a mod name. | Exercise every reserved mod name through the HTTP router. |
-| Browser tests omit timing | Cached data, errors and in-flight requests can coexist in valid library states. | Deferred polls/mutations, refresh failures, full-App settings drafts across expiry/re-authentication/cache collection, and real modal navigation. |
+| Browser tests omit timing | Isolated editor tests omit parent unmounts; cancelling a query does not cancel side effects inside its request helper. | Deferred polls/mutations and old-session replies, refresh failures, full-App settings drafts across expiry/re-authentication/cache collection, and real modal navigation. |
 | Packaging checks omit engine contracts | Fake processes cannot establish Factorio argument or Lua behavior. | Bundled-engine telemetry/save tests and hardened container lifecycle smoke tests before image publication. |
 | Review confidence exceeds evidence | Passing counts describe executed assertions, not the absence of defects. | Report scenarios, failed-baseline evidence and remaining deployment constraints alongside results. |
 
-Rust and strict TypeScript remain useful for memory safety and API contracts. Typed client identities, stable account IDs and shared operation/session helpers encode stronger boundaries; behavioral tests establish their intended policy.
+Rust and strict TypeScript remain useful for memory safety and API contracts. Typed client identities, stable account IDs, session generations and shared operation/session helpers encode stronger boundaries; behavioral tests establish their intended policy.
 
 ## Finding disposition
 
@@ -29,6 +29,7 @@ Rust and strict TypeScript remain useful for memory safety and API contracts. Ty
 | Console write blocks runtime | Owned stdin is written outside the runtime lock; a full child pipe cannot block status or emergency stop. |
 | Recovery depends on unrelated action | Startup and mutation recovery share the same journal; retries and restarts are tested independently. |
 | Refresh/session errors discard drafts | Cached data survives transient errors; expiry suspends UI; stable account/role identity controls draft restoration and stale callbacks. |
+| Old request changes authentication | Request helpers scope 401 notifications to the initiating session generation and reject obsolete status replies, including renewed logins to the same account. |
 | Temporary save selected as newest | `.tmp.zip` files, including uppercase variants, are excluded from save listings/latest selection. |
 | Uppercase ZIP/name normalization | Upload media-type detection ignores extension case; create names trim whitespace without duplicating the extension. |
 | RCON ephemeral-port race | Explicit loopback port 27015 replaces probe-and-release allocation; `FC_RCON_PORT` handles shared network namespaces. |
@@ -48,6 +49,8 @@ Rust and strict TypeScript remain useful for memory safety and API contracts. Ty
 ## Evidence and limits
 
 Selected regressions fail on the original implementation: spoofed version assignment, oversized mod rejection, static-route deletion, async export starvation and twelve browser lifecycle/response scenarios. These failures demonstrate defect detection rather than assertions that merely mirror the repaired implementation.
+
+Full-App draft and shared-request-helper regressions also fail on intermediate fixes that passed isolated component tests. Five authentication lifecycle tests cover obsolete errors, successful status replies, password acknowledgements and logout acknowledgements across replacement sessions.
 
 CI runs formatting, strict lint/type checks, Rust and browser regressions, release-script tests, high-severity dependency auditing, bundled-engine integration tests and image smoke tests before publication. Developer fixtures are synthetic and isolated from production credentials and worlds.
 
