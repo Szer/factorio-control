@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shlex
@@ -57,13 +58,20 @@ def request(path, body=None, authenticated=True, request_origin=origin):
 
 def wait_ready():
     deadline = time.monotonic() + 45
+    last_status = None
     while time.monotonic() < deadline:
         try:
-            if request("/api/auth/status", authenticated=False)[0] == 200:
+            last_status = request("/api/auth/status", authenticated=False)[0]
+            if last_status == 200:
                 return
         except (OSError, http.client.HTTPException):
             pass
         time.sleep(0.2)
+    state = command("inspect", "--format", "{{json .State}}", name, check=False).stdout
+    logs = command("logs", "--tail", "20", name, check=False)
+    diagnostic = state + logs.stdout + logs.stderr
+    print("Readiness HTTP status:", last_status, file=sys.stderr)
+    print(re.sub(r"[A-Za-z0-9_+/=-]{32,}", "[redacted]", diagnostic), file=sys.stderr)
     raise RuntimeError("Image did not become ready")
 
 
