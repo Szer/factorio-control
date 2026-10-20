@@ -206,6 +206,24 @@ export const saveSyncPlanSchema = z.object({
 }) satisfies z.ZodType<components["schemas"]["SyncPlan"]>;
 export type SaveSyncPlan = z.infer<typeof saveSyncPlanSchema>;
 
+export const syncProgressSchema = z.object({
+  operation_id: z.string(),
+  save: z.string(),
+  phase: z.enum([
+    "preparing",
+    "resolving",
+    "downloading",
+    "validating",
+    "applying",
+    "complete",
+    "failed",
+  ]),
+  completed: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  current_mod: z.string().nullable(),
+  error: z.string().nullable(),
+}) satisfies z.ZodType<components["schemas"]["SyncProgress"]>;
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -275,11 +293,24 @@ export const api = {
     }),
   saveModPlan: (name: string) =>
     request(`/api/saves/${encodeURIComponent(name)}/mods`, saveSyncPlanSchema),
-  syncSaveMods: ({ name, revision }: { name: string; revision: string }) =>
+  saveSyncProgress: (name: string) =>
+    request(
+      `/api/saves/${encodeURIComponent(name)}/mods/sync`,
+      syncProgressSchema.nullable(),
+    ),
+  syncSaveMods: ({
+    name,
+    revision,
+    operation_id,
+  }: {
+    name: string;
+    revision: string;
+    operation_id?: string;
+  }) =>
     request(
       `/api/saves/${encodeURIComponent(name)}/mods/sync`,
       modsSchema,
-      json("POST", { revision }),
+      json("POST", { revision, operation_id }),
     ),
   mods: () => request("/api/mods", modsSchema),
   uploadMod: ({ file, revision }: { file: File; revision: string }) =>

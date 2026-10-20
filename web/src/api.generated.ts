@@ -251,7 +251,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        get: operations["progress"];
         put?: never;
         post: operations["apply"];
         delete?: never;
@@ -576,6 +576,8 @@ export interface components {
             name: string;
             version: string;
         };
+        /** @enum {string} */
+        SyncPhase: "preparing" | "resolving" | "downloading" | "validating" | "applying" | "complete" | "failed";
         SyncPlan: {
             blockers: string[];
             disable: string[];
@@ -585,7 +587,17 @@ export interface components {
             revision: string;
             save: string;
         };
+        SyncProgress: {
+            completed: number;
+            current_mod?: string | null;
+            error?: string | null;
+            operation_id: string;
+            phase: components["schemas"]["SyncPhase"];
+            save: string;
+            total: number;
+        };
         SyncRequest: {
+            operation_id?: string | null;
             revision: string;
         };
         UpsPoint: {
@@ -1334,6 +1346,35 @@ export interface operations {
                 };
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    progress: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": null | components["schemas"]["SyncProgress"];
+                };
+            };
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

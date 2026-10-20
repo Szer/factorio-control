@@ -922,6 +922,51 @@
       }
     },
     "/api/saves/{name}/mods/sync": {
+      "get": {
+        "tags": [
+          "crate::mods::save_sync"
+        ],
+        "operationId": "progress",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SyncProgress"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "crate::mods::save_sync"
@@ -2129,6 +2174,18 @@
           }
         }
       },
+      "SyncPhase": {
+        "type": "string",
+        "enum": [
+          "preparing",
+          "resolving",
+          "downloading",
+          "validating",
+          "applying",
+          "complete",
+          "failed"
+        ]
+      },
       "SyncPlan": {
         "type": "object",
         "required": [
@@ -2173,12 +2230,59 @@
           }
         }
       },
+      "SyncProgress": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "save",
+          "phase",
+          "completed",
+          "total"
+        ],
+        "properties": {
+          "completed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "current_mod": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/SyncPhase"
+          },
+          "save": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "SyncRequest": {
         "type": "object",
         "required": [
           "revision"
         ],
         "properties": {
+          "operation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "revision": {
             "type": "string"
           }

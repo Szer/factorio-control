@@ -495,7 +495,7 @@ it("accepts a 200 MiB save and previews mod sync before applying it", async () =
   await user.click(screen.getByRole("button", { name: "Apply mod sync" }));
   await waitFor(() => {
     expect(sync).toHaveBeenCalledWith(
-      { name: "large.zip", revision: "plan-one" },
+      expect.objectContaining({ name: "large.zip", revision: "plan-one" }),
       expect.anything(),
     );
   });
@@ -573,4 +573,60 @@ it("keeps sync requirements compact and closes back to the save list", async () 
   expect(
     screen.getByRole("link", { name: "Download large.zip" }),
   ).toBeDefined();
+});
+
+it("shows server-reported sync progress and the current mod while downloads run", async () => {
+  vi.spyOn(api, "saves").mockResolvedValue([
+    { name: "progress.zip", size_bytes: 1, modified_at: 1 },
+  ]);
+  vi.spyOn(api, "selection").mockResolvedValue({ revision: "one", save: null });
+  vi.spyOn(api, "saveModPlan").mockResolvedValue({
+    revision: "plan-one",
+    save: "progress.zip",
+    factorio_version: "2.1.23",
+    engine_version: "2.1.23",
+    mods: [{ name: "demo", version: "1.0.0", action: "download" }],
+    disable: [],
+    blockers: [],
+  });
+  let operationId = "";
+  let finish:
+    ((value: Awaited<ReturnType<typeof api.syncSaveMods>>) => void) | undefined;
+  vi.spyOn(api, "syncSaveMods").mockImplementation((input) => {
+    operationId = input.operation_id ?? "";
+    return new Promise((resolve) => {
+      finish = resolve;
+    });
+  });
+  vi.spyOn(api, "saveSyncProgress").mockImplementation(() =>
+    Promise.resolve({
+      operation_id: operationId,
+      save: "progress.zip",
+      phase: "downloading",
+      completed: 1,
+      total: 3,
+      current_mod: "demo",
+      error: null,
+    }),
+  );
+  mount(<Saves status={stopped} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Sync mods" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Apply mod sync" }),
+  );
+  await screen.findByText("Downloading: demo");
+  expect(screen.getByText("1 / 3 downloaded")).toBeDefined();
+  const bar = screen.getByRole("progressbar", {
+    name: "Mod download progress",
+  });
+  expect(bar.getAttribute("value")).toBe("1");
+  expect(bar.getAttribute("max")).toBe("3");
+  expect(
+    screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled"),
+  ).toBe(true);
+  if (!finish) throw new Error("Expected a pending sync");
+  finish({ revision: "two", mods: [], portal_authenticated: true });
+  await screen.findByText(/Mods synced/);
+  expect(screen.queryByRole("dialog")).toBeNull();
 });

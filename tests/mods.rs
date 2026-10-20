@@ -705,3 +705,54 @@ fn older_upload_is_stored_for_sync_without_changing_active_version() -> TestResu
     assert_ne!(stored.revision, current.revision);
     Ok(())
 }
+
+#[test]
+fn dependency_references_accept_legacy_names_without_weakening_requirements() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let app = App::new(dir.path().into(), None).map_err(app_error)?;
+    let initial = mods::list(&app).map_err(app_error)?;
+    let valid = metadata_archive(&mod_metadata(
+        "demo",
+        &["base", "! Squeak Through", "(?) Legacy Mod", "? 古いmod"],
+    ))?;
+    let installed =
+        mods::install(&app, &initial.revision, &valid, Some("2.1.23")).map_err(app_error)?;
+    mods::validate_start(&app, "2.1.23").map_err(app_error)?;
+    let required = metadata_archive(&mod_metadata("needs-legacy", &["Legacy Mod >= 1.0.0"]))?;
+    let error = mods::install(&app, &installed.revision, &required, Some("2.1.23"))
+        .err()
+        .ok_or("Expected missing required dependency")?;
+    assert!(error.message.contains("requires enabled mod Legacy Mod"));
+    let malformed = metadata_archive(&mod_metadata("invalid-ref", &["? bad\nname"]))?;
+    let error = mods::install(&app, &installed.revision, &malformed, Some("2.1.23"))
+        .err()
+        .ok_or("Expected invalid dependency")?;
+    assert!(
+        error
+            .message
+            .contains("invalid-ref declares unsupported dependency")
+    );
+    Ok(())
+}
+
+#[test]
+fn shortened_dependency_versions_follow_factorio_comparisons() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let app = App::new(dir.path().into(), None).map_err(app_error)?;
+    let initial = mods::list(&app).map_err(app_error)?;
+    let valid = metadata_archive(&mod_metadata(
+        "short-version",
+        &["base >= 2.1", "base > 2.1", "base < 2.2"],
+    ))?;
+    let installed =
+        mods::install(&app, &initial.revision, &valid, Some("2.1.23")).map_err(app_error)?;
+    for dependency in ["base = 2.1", "base >= 2", "base >= 2.1.0.0"] {
+        let bytes = metadata_archive(&mod_metadata("invalid-short", &[dependency]))?;
+        assert!(
+            mods::install(&app, &installed.revision, &bytes, Some("2.1.23")).is_err(),
+            "{dependency}"
+        );
+        assert!(!dir.path().join("mods/invalid-short_1.0.0.zip").exists());
+    }
+    Ok(())
+}

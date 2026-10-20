@@ -2091,3 +2091,34 @@ summary {
 .sync-actions .primary {
   margin-left: auto;
 }
+
+.sync-progress {
+  padding: 10px 16px;
+  background: #403927;
+  border-block: 1px solid #6d542d;
+  flex-shrink: 0;
+}
+.sync-progress > div {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+}
+.sync-progress strong {
+  overflow-wrap: anywhere;
+}
+.sync-progress span,
+.sync-progress small {
+  color: var(--muted);
+  font-size: 14px;
+}
+.sync-progress progress {
+  display: block;
+  width: 100%;
+  height: 12px;
+  accent-color: var(--accent);
+}
+.sync-current-mod {
+  background: #4a4130;
+}

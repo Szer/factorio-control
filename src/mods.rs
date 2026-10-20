@@ -150,6 +150,15 @@ fn version(value: &str) -> Result<[u32; 3]> {
     }
     Ok(result)
 }
+fn dependency_version(value: &str) -> Result<[u32; 3]> {
+    match value.split('.').count() {
+        2 => version(&format!("{value}.0")),
+        3 => version(value),
+        _ => Err(Error::bad(
+            "Dependency version must have two or three numeric components",
+        )),
+    }
+}
 fn family(value: &str) -> Option<(u32, u32)> {
     let mut parts = value.split('.');
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
@@ -559,8 +568,12 @@ fn check_dependencies(
                 ),
                 None => (text, ""),
             };
-            if !valid_name(name) {
-                return Err(Error::bad("Unsupported mod dependency syntax"));
+            // Dependency references may name legacy mods containing spaces or Unicode.
+            if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+                return Err(Error::bad(&format!(
+                    "{} declares unsupported dependency {dependency:?}",
+                    item.name
+                )));
             }
             let constraint = if comparison.is_empty() {
                 None
@@ -577,7 +590,16 @@ fn check_dependencies(
                     .get(operator_len..)
                     .ok_or_else(|| Error::bad("Invalid dependency version"))?
                     .trim();
-                Some((operator, version(required)?))
+                Some((
+                    operator,
+                    dependency_version(required).map_err(|error| Error {
+                        status: error.status,
+                        message: format!(
+                            "{} dependency {dependency:?}: {}",
+                            item.name, error.message
+                        ),
+                    })?,
+                ))
             };
             let installed = mods
                 .iter()

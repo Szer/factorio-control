@@ -42,7 +42,7 @@ UPS is measured from elapsed game ticks against wall-clock time, with a target a
 
 ## Saves, mods, and settings
 
-- Saves support streamed ZIP uploads up to 1 GiB, download, and selection for the next server start. Sync mods previews the exact versions from a Factorio 2.0 or 2.1 save, downloads missing ZIPs, and disables extra mods while the server is stopped. Existing archives and startup settings are preserved.
+- Saves support streamed ZIP uploads up to 1 GiB, download, and selection for the next server start. Sync mods previews the exact versions from a Factorio 2.0 or 2.1 save, downloads missing ZIPs, and disables extra mods while the server is stopped. Progress shows the current mod, completed downloads, validation, and activation. Existing archives and startup settings are preserved.
 - Mods support ZIP upload, download, enable/disable, compatible update checks, and updates from the official mod portal. Changes require a stopped server; dependency validation reports missing or incompatible mods.
 - Portal downloads require `FACTORIO_USERNAME` and `FACTORIO_TOKEN`, or the username and token in server settings. Upload and download of installed ZIPs require no portal account.
 - Startup settings support typed edits and import/export of `mod-settings.dat`. Import a game-generated file to populate the editor; runtime settings are preserved.

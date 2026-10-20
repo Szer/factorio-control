@@ -15,6 +15,7 @@ import { EmptyState, Loading, Modal, Notice } from "../components/ui";
 
 export default function Saves({ status }: { status: Status }) {
   const [syncPlan, setSyncPlan] = useState<SaveSyncPlan | null>(null);
+  const [operationId, setOperationId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [fileError, setFileError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -50,6 +51,26 @@ export default function Saves({ status }: { status: Status }) {
       sync.reset();
     },
   });
+  const progress = useQuery({
+    queryKey: ["save-sync-progress", syncPlan?.save, operationId],
+    queryFn: () => api.saveSyncProgress(syncPlan?.save ?? ""),
+    enabled: sync.isPending && syncPlan !== null && operationId !== null,
+    refetchInterval: 250,
+    retry: false,
+  });
+  const currentProgress =
+    progress.data?.operation_id === operationId ? progress.data : null;
+  const progressLabel = currentProgress
+    ? {
+        preparing: "Preparing sync",
+        resolving: "Finding release",
+        downloading: "Downloading",
+        validating: "Validating mod dependencies",
+        applying: "Activating mod set",
+        complete: "Sync complete",
+        failed: "Sync failed",
+      }[currentProgress.phase]
+    : "Preparing sync";
   const stopped = status.state === "stopped" || status.state === "failed";
   const filtered =
     saves.data?.filter((save) =>
@@ -208,14 +229,39 @@ export default function Saves({ status }: { status: Status }) {
               </Notice>
             )}
             {!stopped && <Notice>Stop the server before syncing mods.</Notice>}
-            {sync.isError && (
-              <Notice>
-                {errorMessage(sync.error)} Review the plan again before
-                retrying.
-              </Notice>
-            )}
+            {sync.isError && <Notice>{errorMessage(sync.error)}</Notice>}
             {review.isError && <Notice>{errorMessage(review.error)}</Notice>}
           </div>
+          {sync.isPending && (
+            <div className="sync-progress" role="status" aria-live="polite">
+              <div>
+                <strong>
+                  {progressLabel}
+                  {currentProgress?.current_mod
+                    ? `: ${currentProgress.current_mod}`
+                    : "…"}
+                </strong>
+                {currentProgress && currentProgress.total > 0 && (
+                  <span>
+                    {currentProgress.completed} / {currentProgress.total}{" "}
+                    downloaded
+                  </span>
+                )}
+              </div>
+              <progress
+                aria-label="Mod download progress"
+                max={currentProgress?.total || 1}
+                value={
+                  currentProgress?.total ? currentProgress.completed : undefined
+                }
+              />
+              {progress.isError && (
+                <small>
+                  Progress temporarily unavailable. Sync is still running.
+                </small>
+              )}
+            </div>
+          )}
           <div
             className="sync-mod-list"
             role="region"
@@ -232,7 +278,15 @@ export default function Saves({ status }: { status: Status }) {
               </thead>
               <tbody>
                 {syncPlan.mods.map((item) => (
-                  <tr key={item.name}>
+                  <tr
+                    key={item.name}
+                    className={
+                      sync.isPending &&
+                      currentProgress?.current_mod === item.name
+                        ? "sync-current-mod"
+                        : undefined
+                    }
+                  >
                     <td>{item.name}</td>
                     <td>{item.version}</td>
                     <td>
@@ -295,9 +349,12 @@ export default function Saves({ status }: { status: Status }) {
                 syncPlan.blockers.length > 0
               }
               onClick={() => {
+                const id = crypto.randomUUID();
+                setOperationId(id);
                 sync.mutate({
                   name: syncPlan.save,
                   revision: syncPlan.revision,
+                  operation_id: id,
                 });
               }}
             >
