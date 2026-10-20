@@ -46,7 +46,7 @@ UPS is measured from elapsed game ticks against wall-clock time, with a target a
 - Mods support ZIP upload, download, enable/disable, compatible update checks, and updates from the official mod portal. Changes require a stopped server; dependency validation reports missing or incompatible mods.
 - Portal downloads require `FACTORIO_USERNAME` and `FACTORIO_TOKEN`, or the username and token in server settings. Upload and download of installed ZIPs require no portal account.
 - Startup settings support typed edits and import/export of `mod-settings.dat`. Import a game-generated file to populate the editor; runtime settings are preserved.
-- Server settings expose the Factorio 2.1.23 fields and a Raw JSON editor for additional keys. Unknown keys survive form edits. Administrators and manager preferences have their own sections within Settings.
+- Settings has form and Raw JSON editors for `server-settings.json`, `server-adminlist.json`, and `manager-settings.json`. Unknown server-setting keys survive form edits; manager preferences accept only supported keys.
 
 Edits survive page navigation. Conflicting writes preserve local drafts and require an explicit reload. Server, administrator, and mod startup settings apply when Factorio next starts.
 

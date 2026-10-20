@@ -11,6 +11,7 @@ import {
 import type { Settings, RawSettingsDocument, ManagerDocument } from "../api";
 import { Loading, Notice } from "../components/ui";
 import Administrators from "../components/Administrators";
+import { EditorMode, JsonEditor } from "../components/JsonEditor";
 import { useUnsavedChanges } from "../useUnsavedChanges";
 
 type Field = {
@@ -268,59 +269,28 @@ function ServerForm({ initial }: { initial: RawSettingsDocument }) {
   return (
     <form onSubmit={submit}>
       <div className="toolbar">
-        <div className="tab-buttons" aria-label="Settings editor">
-          <button
-            type="button"
-            className={mode === "form" ? "button primary" : "button secondary"}
-            disabled={busy || parseError}
-            onClick={() => {
-              setMode("form");
-            }}
-          >
-            Form
-          </button>
-          <button
-            type="button"
-            className={mode === "raw" ? "button primary" : "button secondary"}
-            disabled={busy}
-            onClick={() => {
-              setMode("raw");
-            }}
-          >
-            Raw JSON
-          </button>
-        </div>
+        <EditorMode
+          mode={mode}
+          onChange={setMode}
+          busy={busy}
+          invalid={parseError}
+        />
         <span className="muted">Applied on the next server start</span>
       </div>
       {mode === "raw" ? (
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <h2>server-settings.json</h2>
-              <p>
-                All fields are editable. Unknown keys are preserved when
-                switching back to the form. This file can contain credentials.
-              </p>
-            </div>
-          </div>
-          <div className="form-fields">
-            <label className="field">
-              Raw server settings
-              <textarea
-                className="raw-editor"
-                spellCheck={false}
-                autoComplete="off"
-                rows={24}
-                value={text}
-                disabled={busy}
-                onChange={(event) => {
-                  setText(event.target.value);
-                  save.reset();
-                }}
-              />
-            </label>
-          </div>
-        </section>
+        <JsonEditor
+          filename="server-settings.json"
+          label="Raw server settings"
+          help="All fields are editable. Unknown keys are preserved when switching back to the form. This file can contain credentials."
+          rows={24}
+          value={text}
+          disabled={busy}
+          onChange={(value) => {
+            setText(value);
+            save.reset();
+            setValidation(null);
+          }}
+        />
       ) : (
         <div className="settings-sections">
           {parseError && (
@@ -355,7 +325,7 @@ function ServerForm({ initial }: { initial: RawSettingsDocument }) {
                     );
                   return (
                     <label
-                      className={`field ${field.kind === "textarea" || field.kind === "tags" ? "wide-field" : ""}`}
+                      className={`field field-${field.kind} ${field.kind === "textarea" || field.kind === "tags" ? "wide-field" : ""}`}
                       key={field.key}
                     >
                       {field.label}
@@ -380,7 +350,7 @@ function ServerForm({ initial }: { initial: RawSettingsDocument }) {
                         </select>
                       ) : field.kind === "textarea" || field.kind === "tags" ? (
                         <textarea
-                          rows={field.kind === "tags" ? 2 : 3}
+                          rows={2}
                           maxLength={field.max}
                           value={
                             field.kind === "tags"
@@ -537,10 +507,23 @@ function ServerSettings() {
 }
 function ManagerForm({ initial }: { initial: ManagerDocument }) {
   const [baseline, setBaseline] = useState(initial);
-  const [draft, setDraft] = useState(initial.settings);
+  const [text, setText] = useState(JSON.stringify(initial.settings, null, 2));
+  const [mode, setMode] = useState<"form" | "raw">("form");
+  const [draft, setFormDraft] = useState(initial.settings);
+  let invalid = false;
+  try {
+    managerSchema.shape.settings.strict().parse(JSON.parse(text) as unknown);
+  } catch {
+    invalid = true;
+  }
+  function setDraft(value: ManagerDocument["settings"]) {
+    setFormDraft(value);
+    setText(JSON.stringify(value, null, 2));
+    setValidation(null);
+  }
   const [validation, setValidation] = useState<string | null>(null);
   const client = useQueryClient();
-  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline.settings);
+  const dirty = text !== JSON.stringify(baseline.settings, null, 2);
   useUnsavedChanges(dirty);
   function receive(result: ManagerDocument) {
     setBaseline(result);
@@ -561,96 +544,136 @@ function ManagerForm({ initial }: { initial: ManagerDocument }) {
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        const parsed = managerSchema.safeParse({
-          revision: baseline.revision,
-          settings: draft,
-        });
-        if (!parsed.success) {
+        try {
+          const settings = managerSchema.shape.settings
+            .strict()
+            .parse(JSON.parse(text) as unknown);
+          setValidation(null);
+          save.mutate({ revision: baseline.revision, settings });
+        } catch {
           setValidation(
-            parsed.error.issues[0]?.message ?? "Check the settings.",
+            "Enter a JSON object with a refresh interval of 1–60, history of 1–1440, and a boolean telemetry setting. Unknown keys are not supported. Your draft has been kept.",
           );
-          return;
         }
-        setValidation(null);
-        save.mutate(parsed.data);
       }}
     >
-      <section className="panel form-panel">
-        <div className="section-heading">
-          <div>
-            <h2>Manager settings</h2>
-            <p>Controls this interface and its live monitoring.</p>
+      <div className="toolbar">
+        <EditorMode
+          mode={mode}
+          onChange={setMode}
+          busy={busy}
+          invalid={invalid}
+        />
+        <span className="muted">manager-settings.json</span>
+      </div>
+      {mode === "raw" ? (
+        <JsonEditor
+          filename="manager-settings.json"
+          label="Raw manager settings"
+          help="Controls the manager only. Enabling scripting telemetry disables achievements for the loaded save."
+          value={text}
+          disabled={busy}
+          onChange={(value) => {
+            setText(value);
+            save.reset();
+            setValidation(null);
+            try {
+              setFormDraft(
+                managerSchema.shape.settings
+                  .strict()
+                  .parse(JSON.parse(value) as unknown),
+              );
+            } catch {
+              /* Invalid JSON stays editable in the raw editor. */
+            }
+          }}
+        />
+      ) : (
+        <section className="panel form-panel">
+          <div className="section-heading">
+            <div>
+              <h2>Manager settings</h2>
+              <p>Controls this interface and its live monitoring.</p>
+            </div>
           </div>
-        </div>
-        <div className="form-fields">
-          <label className="field compact-field">
-            Refresh interval (seconds)
-            <input
-              type="number"
-              min={1}
-              max={60}
-              required
-              disabled={busy}
-              value={draft.poll_interval_seconds}
-              onChange={(event) => {
-                setDraft({
-                  ...draft,
-                  poll_interval_seconds: event.target.valueAsNumber,
-                });
-                save.reset();
-              }}
-            />
-            <small>UI refresh and server sampling interval.</small>
-          </label>
-          <label className="field compact-field">
-            UPS history (minutes)
-            <input
-              type="number"
-              min={1}
-              max={1440}
-              required
-              disabled={busy}
-              value={draft.ups_history_minutes}
-              onChange={(event) => {
-                setDraft({
-                  ...draft,
-                  ups_history_minutes: event.target.valueAsNumber,
-                });
-                save.reset();
-              }}
-            />
-            <small>History is kept in memory while the manager runs.</small>
-          </label>
-          <label className="toggle-row">
-            <span>
-              <strong>Enable scripting telemetry</strong>
-              <small>
-                Read live UPS, pause state, players, research, and completed
-                research through Factorio's scripting console.
-              </small>
-            </span>
-            <input
-              type="checkbox"
-              checked={draft.enable_script_telemetry}
-              disabled={busy}
-              onChange={(event) => {
-                setDraft({
-                  ...draft,
-                  enable_script_telemetry: event.target.checked,
-                });
-                save.reset();
-              }}
-            />
-          </label>
-          <div className="notice">
-            <span>
-              Enabling scripting telemetry disables achievements for the loaded
-              save. Turning it off later does not restore achievements. Enable
-              it only for saves where you accept this.
-            </span>
+          <div className="form-fields">
+            <label className="field compact-field">
+              Refresh interval (seconds)
+              <input
+                type="number"
+                min={1}
+                max={60}
+                required
+                disabled={busy}
+                value={
+                  Number.isNaN(draft.poll_interval_seconds)
+                    ? ""
+                    : draft.poll_interval_seconds
+                }
+                onChange={(event) => {
+                  setDraft({
+                    ...draft,
+                    poll_interval_seconds: event.target.valueAsNumber,
+                  });
+                  save.reset();
+                }}
+              />
+              <small>UI refresh and server sampling interval.</small>
+            </label>
+            <label className="field compact-field">
+              UPS history (minutes)
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                required
+                disabled={busy}
+                value={
+                  Number.isNaN(draft.ups_history_minutes)
+                    ? ""
+                    : draft.ups_history_minutes
+                }
+                onChange={(event) => {
+                  setDraft({
+                    ...draft,
+                    ups_history_minutes: event.target.valueAsNumber,
+                  });
+                  save.reset();
+                }}
+              />
+              <small>History is kept in memory while the manager runs.</small>
+            </label>
+            <label className="toggle-row">
+              <span>
+                <strong>Enable scripting telemetry</strong>
+                <small>
+                  Read live UPS, pause state, players, research, and completed
+                  research through Factorio's scripting console.
+                </small>
+              </span>
+              <input
+                type="checkbox"
+                checked={draft.enable_script_telemetry}
+                disabled={busy}
+                onChange={(event) => {
+                  setDraft({
+                    ...draft,
+                    enable_script_telemetry: event.target.checked,
+                  });
+                  save.reset();
+                }}
+              />
+            </label>
+            <div className="notice">
+              <span>
+                Enabling scripting telemetry disables achievements for the
+                loaded save. Turning it off later does not restore achievements.
+                Enable it only for saves where you accept this.
+              </span>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
       {validation && <Notice>{validation}</Notice>}
       {save.isError && (
         <Notice>

@@ -333,3 +333,126 @@ it("does not enable Start without an explicitly selected save", async () => {
     ).toBe(true);
   });
 });
+
+it("shares administrator edits between the form and its separate raw file", async () => {
+  vi.spyOn(api, "admins").mockResolvedValue({
+    revision: "admin-one",
+    admins: ["Szer"],
+  });
+  const save = vi
+    .spyOn(api, "saveAdmins")
+    .mockImplementation((document) =>
+      Promise.resolve({ ...document, revision: "admin-two" }),
+    );
+  mount(<Administrators />);
+  const user = userEvent.setup();
+  await user.type(
+    await screen.findByRole("textbox", { name: "Factorio username" }),
+    "paragith",
+  );
+  await user.click(screen.getByRole("button", { name: "Add player" }));
+  await user.click(screen.getByRole("button", { name: "Raw JSON" }));
+  const raw = screen.getByRole<HTMLTextAreaElement>("textbox", {
+    name: "Raw administrator list",
+  });
+  expect(JSON.parse(raw.value)).toEqual(["Szer", "paragith"]);
+  await user.clear(raw);
+  await user.paste('["Szer", "Explorer"]');
+  await user.click(screen.getByRole("button", { name: "Form" }));
+  expect(screen.getByText("Explorer")).toBeDefined();
+  expect(screen.queryByText("paragith")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Save administrators" }));
+  await waitFor(() => {
+    expect(save).toHaveBeenCalledWith(
+      { revision: "admin-one", admins: ["Szer", "Explorer"] },
+      expect.anything(),
+    );
+  });
+});
+
+it("keeps invalid raw administrator JSON without submitting or losing it", async () => {
+  vi.spyOn(api, "admins").mockResolvedValue({
+    revision: "one",
+    admins: ["Szer"],
+  });
+  const save = vi.spyOn(api, "saveAdmins");
+  mount(<Administrators />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Raw JSON" }));
+  const raw = screen.getByRole<HTMLTextAreaElement>("textbox", {
+    name: "Raw administrator list",
+  });
+  await user.clear(raw);
+  await user.paste('{"admins":["Szer"]}');
+  await user.click(screen.getByRole("button", { name: "Save administrators" }));
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "JSON array",
+  );
+  expect(save).not.toHaveBeenCalled();
+  expect(raw.value).toBe('{"admins":["Szer"]}');
+  expect(
+    screen.getByRole("button", { name: "Form" }).hasAttribute("disabled"),
+  ).toBe(true);
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  expect(JSON.parse(raw.value)).toEqual(["Szer"]);
+});
+
+it("edits manager JSON separately, validates unknown keys, and preserves form changes", async () => {
+  vi.spyOn(api, "rawSettings").mockResolvedValue(structuredClone(settings));
+  vi.spyOn(api, "admins").mockResolvedValue({ revision: "one", admins: [] });
+  const preferences = {
+    poll_interval_seconds: 2,
+    ups_history_minutes: 10,
+    enable_script_telemetry: false,
+  };
+  vi.spyOn(api, "manager").mockResolvedValue({
+    revision: "manager-one",
+    settings: preferences,
+  });
+  const save = vi
+    .spyOn(api, "saveManager")
+    .mockImplementation((document) =>
+      Promise.resolve({ ...document, revision: "manager-two" }),
+    );
+  mount(<SettingsPage />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Manager settings" }));
+  const interval = await screen.findByRole<HTMLInputElement>("spinbutton", {
+    name: /Refresh interval/,
+  });
+  await user.clear(interval);
+  expect(interval.value).toBe("");
+  await user.type(interval, "5");
+  await user.click(screen.getByRole("button", { name: "Raw JSON" }));
+  const raw = screen.getByRole<HTMLTextAreaElement>("textbox", {
+    name: "Raw manager settings",
+  });
+  expect(JSON.parse(raw.value)).toEqual({
+    ...preferences,
+    poll_interval_seconds: 5,
+  });
+  await user.clear(raw);
+  await user.paste(JSON.stringify({ ...preferences, extra: true }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "Unknown keys",
+  );
+  expect(save).not.toHaveBeenCalled();
+  await user.clear(raw);
+  await user.paste(JSON.stringify({ ...preferences, ups_history_minutes: 30 }));
+  await user.click(screen.getByRole("button", { name: "Form" }));
+  expect(
+    screen.getByRole<HTMLInputElement>("spinbutton", { name: /UPS history/ })
+      .value,
+  ).toBe("30");
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => {
+    expect(save).toHaveBeenCalledWith(
+      {
+        revision: "manager-one",
+        settings: { ...preferences, ups_history_minutes: 30 },
+      },
+      expect.anything(),
+    );
+  });
+});

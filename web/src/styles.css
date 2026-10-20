@@ -1039,7 +1039,11 @@ tbody tr:last-child td {
 }
 .field textarea {
   resize: vertical;
-  min-height: 90px;
+  min-height: 4.5rem;
+}
+.field input[type="number"] {
+  width: 8rem;
+  max-width: 100%;
 }
 .compact-field {
   max-width: 260px;
@@ -1076,12 +1080,12 @@ tbody tr:last-child td {
 }
 .toggle-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
+  align-items: flex-start;
+  gap: 10px;
   font-size: 16px;
-  padding-top: 16px;
-  border-top: 1px solid #373737;
+  width: fit-content;
+  max-width: 100%;
+  cursor: pointer;
 }
 .toggle-row strong {
   font-weight: 500;
@@ -1095,6 +1099,7 @@ tbody tr:last-child td {
   margin-top: 5px;
 }
 .toggle-row input {
+  order: -1;
   appearance: auto;
   width: 22px;
   height: 22px;
@@ -1104,7 +1109,7 @@ tbody tr:last-child td {
   flex-shrink: 0;
   cursor: pointer;
   position: relative;
-  margin: 0;
+  margin: 1px 0 0;
   accent-color: var(--accent);
 }
 .settings-aside {
@@ -1828,17 +1833,30 @@ textarea::placeholder {
 }
 .settings-fields {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 26rem));
+  align-items: start;
+  gap: 16px 24px;
+}
+.settings-fields .field-text,
+.settings-fields .field-password,
+.settings-fields .field-commands {
+  max-width: 24rem;
+}
+.settings-fields .field-textarea {
+  max-width: 56ch;
+}
+.settings-fields .field-tags {
+  max-width: 32ch;
 }
 .settings-fields .wide-field,
 .settings-fields .toggle-row {
   grid-column: 1 / -1;
 }
 .settings-fields .toggle-row {
-  padding-top: 10px;
+  padding-top: 0;
 }
 .raw-editor {
-  min-height: 500px;
+  min-height: 12rem;
   font-family: monospace;
   font-size: 14px !important;
   tab-size: 2;
