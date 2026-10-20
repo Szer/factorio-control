@@ -18,6 +18,12 @@ use utoipa::OpenApi;
         saves,
         get_settings,
         put_settings,
+        get_raw_settings,
+        put_raw_settings,
+        get_manager_settings,
+        put_manager_settings,
+        get_save_selection,
+        put_save_selection,
         get_admins,
         put_admins,
         logs,
@@ -32,6 +38,12 @@ use utoipa::OpenApi;
         Save,
         SettingsDocument,
         ServerSettings,
+        AllowCommands,
+        CommandPermission,
+        RawSettingsDocument,
+        ManagerSettings,
+        ManagerSettingsDocument,
+        SaveSelectionDocument,
         Visibility,
         AdminsDocument,
         LogEntry,
@@ -52,7 +64,16 @@ pub fn router(app: App, static_path: &std::path::Path) -> Router {
                 .post(upload)
                 .layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
+        .route(
+            "/saves/selection",
+            get(get_save_selection).put(put_save_selection),
+        )
         .route("/settings", get(get_settings).put(put_settings))
+        .route("/settings/raw", get(get_raw_settings).put(put_raw_settings))
+        .route(
+            "/manager-settings",
+            get(get_manager_settings).put(put_manager_settings),
+        )
         .route("/admins", get(get_admins).put(put_admins))
         .route("/logs", get(logs))
         .route("/server/start", post(start))
@@ -133,10 +154,15 @@ async fn guard(request: Request<Body>, next: Next) -> Response {
             .and_then(|h| h.to_str().ok())
             .and_then(|h| h.split(';').next());
         let zip_upload = request.method() == axum::http::Method::POST
-            && request.uri().path().starts_with("/api/saves/");
+            && (request.uri().path().starts_with("/api/saves/")
+                || request.uri().path() == "/api/mods/upload");
+        let binary_upload = request.method() == axum::http::Method::POST
+            && request.uri().path() == "/api/mods/settings/file";
         if content_type
             != Some(if zip_upload {
                 "application/zip"
+            } else if binary_upload {
+                "application/octet-stream"
             } else {
                 "application/json"
             })
@@ -181,6 +207,60 @@ async fn put_settings(
     let _guard = app.inner.lock().await;
     Ok(Json(storage::update_settings(
         &app.settings_path(),
+        document,
+    )?))
+}
+#[utoipa::path(get, path="/api/settings/raw", responses((status=200, body=RawSettingsDocument), (status=400, body=ApiError)))]
+async fn get_raw_settings(State(app): State<App>) -> Result<Json<RawSettingsDocument>> {
+    let _guard = app.inner.lock().await;
+    Ok(Json(storage::raw_settings(&app.settings_path())?))
+}
+#[utoipa::path(put, path="/api/settings/raw", request_body=RawSettingsDocument, responses((status=200, body=RawSettingsDocument), (status=400, body=ApiError), (status=409, body=ApiError)))]
+async fn put_raw_settings(
+    State(app): State<App>,
+    input: std::result::Result<Json<RawSettingsDocument>, JsonRejection>,
+) -> Result<Json<RawSettingsDocument>> {
+    let document = json(input)?;
+    let _guard = app.inner.lock().await;
+    Ok(Json(storage::update_raw_settings(
+        &app.settings_path(),
+        document,
+    )?))
+}
+#[utoipa::path(get, path="/api/manager-settings", responses((status=200, body=ManagerSettingsDocument), (status=400, body=ApiError)))]
+async fn get_manager_settings(State(app): State<App>) -> Result<Json<ManagerSettingsDocument>> {
+    let _guard = app.inner.lock().await;
+    Ok(Json(storage::manager_settings(
+        &app.manager_settings_path(),
+    )?))
+}
+#[utoipa::path(put, path="/api/manager-settings", request_body=ManagerSettingsDocument, responses((status=200, body=ManagerSettingsDocument), (status=400, body=ApiError), (status=409, body=ApiError)))]
+async fn put_manager_settings(
+    State(app): State<App>,
+    input: std::result::Result<Json<ManagerSettingsDocument>, JsonRejection>,
+) -> Result<Json<ManagerSettingsDocument>> {
+    let document = json(input)?;
+    let _guard = app.inner.lock().await;
+    Ok(Json(storage::update_manager_settings(
+        &app.manager_settings_path(),
+        document,
+    )?))
+}
+#[utoipa::path(get, path="/api/saves/selection", responses((status=200, body=SaveSelectionDocument), (status=400, body=ApiError)))]
+async fn get_save_selection(State(app): State<App>) -> Result<Json<SaveSelectionDocument>> {
+    let _guard = app.inner.lock().await;
+    Ok(Json(storage::save_selection(&app.save_selection_path())?))
+}
+#[utoipa::path(put, path="/api/saves/selection", request_body=SaveSelectionDocument, responses((status=200, body=SaveSelectionDocument), (status=400, body=ApiError), (status=409, body=ApiError)))]
+async fn put_save_selection(
+    State(app): State<App>,
+    input: std::result::Result<Json<SaveSelectionDocument>, JsonRejection>,
+) -> Result<Json<SaveSelectionDocument>> {
+    let document = json(input)?;
+    let _guard = app.inner.lock().await;
+    Ok(Json(storage::update_save_selection(
+        &app.save_selection_path(),
+        &app.saves_path(),
         document,
     )?))
 }

@@ -74,9 +74,7 @@ fn settings_map(bytes: Option<&[u8]>) -> Result<Map<String, Value>> {
         None => Ok(Map::new()),
     }
 }
-pub fn settings(path: &Path) -> Result<SettingsDocument> {
-    let (revision, bytes) = read_document(path)?;
-    let map = settings_map(bytes.as_deref())?;
+fn typed_settings(map: &Map<String, Value>) -> Result<ServerSettings> {
     let defaults = serde_json::to_value(ServerSettings::default())?;
     let mut visible = defaults
         .as_object()
@@ -99,25 +97,44 @@ pub fn settings(path: &Path) -> Result<SettingsDocument> {
             }
         }
     }
-    Ok(SettingsDocument {
-        revision,
-        settings: serde_json::from_value(Value::Object(visible))?,
-    })
+    Ok(serde_json::from_value(Value::Object(visible))?)
 }
-pub fn update_settings(path: &Path, document: SettingsDocument) -> Result<SettingsDocument> {
-    if document.settings.name.trim().is_empty()
-        || document.settings.name.chars().count() > 100
-        || document.settings.description.chars().count() > 2000
+fn validate_settings(settings: &ServerSettings) -> Result<()> {
+    if settings.name.trim().is_empty()
+        || settings.name.chars().count() > 100
+        || settings.description.chars().count() > 2000
     {
         return Err(Error::bad(
             "Provide a server name up to 100 characters and description up to 2000 characters",
         ));
     }
-    if document.settings.max_players > 65535 || document.settings.autosave_interval > 1440 {
+    if settings.max_players > 65535 || settings.autosave_interval > 1440 {
         return Err(Error::bad(
             "Player limit must be 0–65535 and autosave interval 0–1440 minutes",
         ));
     }
+    if !(6..=240).contains(&settings.max_heartbeats_per_second) {
+        return Err(Error::bad(
+            "Network heartbeat rate must be 6–240 per second",
+        ));
+    }
+    if settings.minimum_segment_size > settings.maximum_segment_size {
+        return Err(Error::bad(
+            "Minimum segment size must not exceed maximum segment size",
+        ));
+    }
+    Ok(())
+}
+pub fn settings(path: &Path) -> Result<SettingsDocument> {
+    let (revision, bytes) = read_document(path)?;
+    let map = settings_map(bytes.as_deref())?;
+    Ok(SettingsDocument {
+        revision,
+        settings: typed_settings(&map)?,
+    })
+}
+pub fn update_settings(path: &Path, document: SettingsDocument) -> Result<SettingsDocument> {
+    validate_settings(&document.settings)?;
     let (revision, bytes) = read_document(path)?;
     if revision != document.revision {
         return Err(Error::conflict(
@@ -143,8 +160,107 @@ pub fn update_settings(path: &Path, document: SettingsDocument) -> Result<Settin
             }
         }
     }
-    atomic_write(path, &serde_json::to_vec_pretty(&map)?, true)?;
+    write_configuration(path, &map)?;
     settings(path)
+}
+fn write_configuration(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+        return Err(Error::bad("Configuration file exceeds 1 MiB"));
+    }
+    atomic_write(path, &bytes, true)
+}
+pub fn raw_settings(path: &Path) -> Result<RawSettingsDocument> {
+    let (revision, bytes) = read_document(path)?;
+    let mut settings = serde_json::to_value(ServerSettings::default())?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| Error::bad("Invalid defaults"))?;
+    for (key, value) in settings_map(bytes.as_deref())? {
+        if key == "visibility"
+            && let (Some(target), Some(source)) = (
+                settings.get_mut(&key).and_then(Value::as_object_mut),
+                value.as_object(),
+            )
+        {
+            target.extend(source.clone());
+            continue;
+        }
+        settings.insert(key, value);
+    }
+    Ok(RawSettingsDocument { revision, settings })
+}
+pub fn update_raw_settings(
+    path: &Path,
+    document: RawSettingsDocument,
+) -> Result<RawSettingsDocument> {
+    validate_settings(&typed_settings(&document.settings)?)?;
+    let (revision, _) = read_document(path)?;
+    if revision != document.revision {
+        return Err(Error::conflict(
+            "Settings changed on disk. Reload before saving",
+        ));
+    }
+    write_configuration(path, &document.settings)?;
+    raw_settings(path)
+}
+fn validate_manager_settings(settings: &ManagerSettings) -> Result<()> {
+    if !(1..=60).contains(&settings.poll_interval_seconds)
+        || !(1..=1440).contains(&settings.ups_history_minutes)
+    {
+        return Err(Error::bad(
+            "Refresh interval must be 1–60 seconds and UPS history 1–1440 minutes",
+        ));
+    }
+    Ok(())
+}
+pub fn manager_settings(path: &Path) -> Result<ManagerSettingsDocument> {
+    let (revision, bytes) = read_document(path)?;
+    let settings = match bytes {
+        Some(bytes) => serde_json::from_slice(&bytes)?,
+        None => ManagerSettings::default(),
+    };
+    validate_manager_settings(&settings)?;
+    Ok(ManagerSettingsDocument { revision, settings })
+}
+pub fn update_manager_settings(
+    path: &Path,
+    document: ManagerSettingsDocument,
+) -> Result<ManagerSettingsDocument> {
+    validate_manager_settings(&document.settings)?;
+    let (revision, _) = read_document(path)?;
+    if revision != document.revision {
+        return Err(Error::conflict(
+            "Manager settings changed on disk. Reload before saving",
+        ));
+    }
+    write_configuration(path, &document.settings)?;
+    manager_settings(path)
+}
+pub fn save_selection(path: &Path) -> Result<SaveSelectionDocument> {
+    let (revision, bytes) = read_document(path)?;
+    let save = match bytes {
+        Some(bytes) => serde_json::from_slice(&bytes)?,
+        None => None,
+    };
+    Ok(SaveSelectionDocument { revision, save })
+}
+pub fn update_save_selection(
+    path: &Path,
+    saves: &Path,
+    document: SaveSelectionDocument,
+) -> Result<SaveSelectionDocument> {
+    if let Some(name) = &document.save {
+        save_info(saves, name)?;
+    }
+    let (revision, _) = read_document(path)?;
+    if revision != document.revision {
+        return Err(Error::conflict(
+            "Selected save changed on disk. Reload before saving",
+        ));
+    }
+    write_configuration(path, &document.save)?;
+    save_selection(path)
 }
 pub fn admins(path: &Path) -> Result<AdminsDocument> {
     let (revision, bytes) = read_document(path)?;

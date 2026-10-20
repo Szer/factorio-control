@@ -115,6 +115,12 @@ impl App {
     pub fn settings_path(&self) -> PathBuf {
         self.directory.join("server-settings.json")
     }
+    pub fn manager_settings_path(&self) -> PathBuf {
+        self.directory.join("manager-settings.json")
+    }
+    pub fn save_selection_path(&self) -> PathBuf {
+        self.directory.join("selected-save.json")
+    }
     pub fn admins_path(&self) -> PathBuf {
         self.directory.join("server-adminlist.json")
     }
