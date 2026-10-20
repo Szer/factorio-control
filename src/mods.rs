@@ -12,26 +12,28 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{
-        DefaultBodyLimit, Path, State,
+        DefaultBodyLimit, OriginalUri, Path, State,
         rejection::{BytesRejection, JsonRejection},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::io::Cursor;
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::{Cursor, Read},
+    io::Read,
     path::{Path as FsPath, PathBuf},
     time::{Duration, UNIX_EPOCH},
 };
 use utoipa::ToSchema;
 
-const MAX_ARCHIVE: usize = 64 * 1024 * 1024;
-const MAX_EXPANDED: u64 = 256 * 1024 * 1024;
+const MAX_ARCHIVE: usize = 1024 * 1024 * 1024;
+const MAX_EXPANDED: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_MODS: usize = 500;
 static UPDATE_CHECKS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
@@ -234,11 +236,15 @@ fn read_info<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> Resul
     validate_info(&info)?;
     Ok(info)
 }
+#[cfg(test)]
 fn validate_archive(bytes: &[u8]) -> Result<ModInfo> {
-    if bytes.len() > MAX_ARCHIVE {
-        return Err(Error::bad("Mod ZIP exceeds 64 MiB"));
+    validate_archive_reader(Cursor::new(bytes), bytes.len() as u64)
+}
+fn validate_archive_reader<R: Read + std::io::Seek>(reader: R, size: u64) -> Result<ModInfo> {
+    if size > MAX_ARCHIVE as u64 {
+        return Err(Error::bad("Mod ZIP exceeds 1 GiB"));
     }
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| zip_error())?;
+    let mut archive = zip::ZipArchive::new(reader).map_err(|_| zip_error())?;
     let info = read_info(&mut archive)?;
     let prefix = archive
         .file_names()
@@ -441,7 +447,7 @@ pub fn list(app: &App) -> Result<ModsDocument> {
     for (file_name, path) in files {
         let meta = fs::metadata(&path)?;
         if meta.len() > MAX_ARCHIVE as u64 {
-            return Err(Error::bad("Installed mod ZIP exceeds 64 MiB"));
+            return Err(Error::bad("Installed mod ZIP exceeds 1 GiB"));
         }
         hash.update(file_name.as_bytes());
         hash.update(meta.len().to_le_bytes());
@@ -532,8 +538,33 @@ fn check_compatibility(info: &ModInfo, engine: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
+async fn mutation<T: Send + 'static>(
+    app: &App,
+    work: impl FnOnce(App, Option<String>) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let guard = app.mod_operations.clone().lock_owned().await;
+    let engine = {
+        let inner = app.inner.lock().await;
+        stopped(&inner)?;
+        inner.status.version.clone()
+    };
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        workflows::ensure_consistent(&app)?;
+        work(app, engine)
+    })
+    .await
+    .map_err(|_| Error {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: "Mod storage task failed".into(),
+    })?
+}
+fn checked_engine(engine: Option<&str>) -> Result<&str> {
+    engine.filter(|value| version(value).is_ok()).ok_or_else(|| Error::conflict("Factorio binary version is unavailable. Configure a working binary and restart the manager before changing or checking mods"))
+}
 fn known_engine(inner: &crate::Inner) -> Result<&str> {
-    inner.status.version.as_deref().filter(|value| version(value).is_ok()).ok_or_else(|| Error::conflict("Factorio binary version is unavailable. Configure a working binary and restart the manager before changing or checking mods"))
+    checked_engine(inner.status.version.as_deref())
 }
 fn check_enabled_compatibility(mods: &[InstalledMod], engine: &str) -> Result<()> {
     version(engine)?;
@@ -716,7 +747,31 @@ pub fn install(
     bytes: &[u8],
     engine: Option<&str>,
 ) -> Result<ModsDocument> {
-    let info = validate_archive(bytes)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&app.directory)?;
+    std::io::Write::write_all(&mut temporary, bytes)?;
+    install_file(app, revision, temporary.path(), engine)
+}
+fn copy_archive(source: &FsPath, target: &FsPath) -> Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| Error::bad("Missing archive directory"))?;
+    storage::ensure_regular(target)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut fs::File::open(source)?, &mut temporary)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist_noclobber(target)
+        .map_err(|error| Error::from(error.error))?;
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+fn install_file(
+    app: &App,
+    revision: &str,
+    source: &FsPath,
+    engine: Option<&str>,
+) -> Result<ModsDocument> {
+    let info = validate_archive_reader(fs::File::open(source)?, fs::metadata(source)?.len())?;
     check_compatibility(&info, engine)?;
     let document = current(app, revision)?;
     let previous = document.mods.iter().find(|entry| entry.name == info.name);
@@ -757,7 +812,7 @@ pub fn install(
             dependencies: info.dependencies.clone(),
             enabled: previous.is_none_or(|item| item.enabled),
             file_name: file_name.clone(),
-            size_bytes: bytes.len() as u64,
+            size_bytes: fs::metadata(source)?.len(),
         });
     } else if let Some(previous) = previous {
         // An older ZIP is available for save sync without changing the active version.
@@ -770,7 +825,7 @@ pub fn install(
     }
     check_dependencies(&candidates, &mod_list, engine, &bundled_mods(app)?)?;
     let list_bytes = serde_json::to_vec_pretty(&mod_list)?;
-    storage::atomic_write(&target, bytes, false)?;
+    copy_archive(source, &target)?;
     if let Err(error) = storage::atomic_write(&path.join("mod-list.json"), &list_bytes, true) {
         if fs::remove_file(&target).is_err() {
             return Err(Error { status: StatusCode::INTERNAL_SERVER_ERROR, message: "Could not activate mod and could not remove its uploaded ZIP; inspect mods directory before starting".into() });
@@ -810,7 +865,9 @@ pub fn routes() -> Router<App> {
         .route("/mods", get(get_mods))
         .route(
             "/mods/upload",
-            post(upload_mod).layer(DefaultBodyLimit::max(MAX_ARCHIVE)),
+            post(upload_mod)
+                .delete(workflows::remove_reserved)
+                .layer(DefaultBodyLimit::max(MAX_ARCHIVE)),
         )
         .route("/mods/{name}/download", get(download_mod))
         .route("/mods/{name}/enabled", put(set_enabled))
@@ -820,6 +877,7 @@ pub fn routes() -> Router<App> {
             "/mods/settings",
             get(get_mod_settings)
                 .put(put_mod_settings)
+                .delete(workflows::remove_reserved)
                 .layer(DefaultBodyLimit::max(mod_settings::MAX_BYTES)),
         )
         .route(
@@ -831,43 +889,86 @@ pub fn routes() -> Router<App> {
 }
 #[utoipa::path(get, path="/api/mods", responses((status=200, body=ModsDocument), (status=400, body=ApiError)))]
 pub async fn get_mods(State(app): State<App>) -> Result<Json<ModsDocument>> {
-    let _guard = app.inner.lock().await;
-    Ok(Json(list(&app)?))
+    app.mod_storage(move |app| Ok(Json(list(&app)?))).await
 }
 #[utoipa::path(post, path="/api/mods/upload", params(("If-Match"=String, Header)), request_body(content=String, content_type="application/zip"), responses((status=201, body=ModsDocument), (status=400, body=ApiError), (status=409, body=ApiError)))]
 pub async fn upload_mod(
     State(app): State<App>,
-    headers: HeaderMap,
-    bytes: std::result::Result<Bytes, BytesRejection>,
+    request: Request<Body>,
 ) -> Result<(StatusCode, Json<ModsDocument>)> {
-    let bytes = body(bytes)?;
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(install(
+    {
+        let inner = app.inner.lock().await;
+        stopped(&inner)?;
+        known_engine(&inner)?;
+    }
+    let revision = expected(request.headers())?.to_owned();
+    let temporary = receive_archive(&app.directory, request.into_body()).await?;
+    let result = mutation(&app, move |app, engine| {
+        install_file(
             &app,
-            expected(&headers)?,
-            &bytes,
-            Some(known_engine(&inner)?),
-        )?),
+            &revision,
+            temporary.path(),
+            Some(checked_engine(engine.as_deref())?),
+        )
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(result)))
+}
+async fn receive_archive(directory: &FsPath, mut body: Body) -> Result<tempfile::NamedTempFile> {
+    use http_body_util::BodyExt;
+    use tokio::io::AsyncWriteExt;
+    let temporary = tempfile::NamedTempFile::new_in(directory)?;
+    let (file, path) = temporary.into_parts();
+    let mut file = tokio::fs::File::from_std(file);
+    let mut received = 0_usize;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| Error::bad("Mod upload was interrupted"))?;
+        if let Ok(bytes) = frame.into_data() {
+            received = received
+                .checked_add(bytes.len())
+                .filter(|size| *size <= MAX_ARCHIVE)
+                .ok_or_else(|| Error {
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                    message: "Mod ZIP exceeds 1 GiB".into(),
+                })?;
+            file.write_all(&bytes).await?;
+        }
+    }
+    file.sync_all().await?;
+    Ok(tempfile::NamedTempFile::from_parts(
+        file.into_std().await,
+        path,
     ))
 }
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work).await.map_err(|_| Error {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: "Mod storage task failed".into(),
+    })?
+}
+
 #[utoipa::path(get, path="/api/mods/{name}/download", params(("name"=String, Path)), responses((status=200, content_type="application/zip"), (status=404, body=ApiError)))]
 pub async fn download_mod(State(app): State<App>, Path(name): Path<String>) -> Result<Response> {
-    let _guard = app.inner.lock().await;
-    let document = list(&app)?;
-    let selected = document
-        .mods
-        .iter()
-        .find(|item| item.name == name)
-        .ok_or_else(|| Error {
-            status: StatusCode::NOT_FOUND,
-            message: "Mod not installed".into(),
-        })?;
-    let path = directory(&app)?.join(&selected.file_name);
-    storage::ensure_regular(&path)?;
-    let file = tokio::fs::File::open(path).await?;
+    let file = app
+        .mod_storage(move |app| {
+            let document = list(&app)?;
+            let selected = document
+                .mods
+                .iter()
+                .find(|item| item.name == name)
+                .ok_or_else(|| Error {
+                    status: StatusCode::NOT_FOUND,
+                    message: "Mod not installed".into(),
+                })?;
+            let path = directory(&app)?.join(&selected.file_name);
+            storage::ensure_regular(&path)?;
+            let file = fs::File::open(path)?;
+            Ok(file)
+        })
+        .await?;
+    let file = tokio::fs::File::from_std(file);
     Ok((
         [
             (header::CONTENT_TYPE, "application/zip"),
@@ -884,39 +985,42 @@ pub async fn set_enabled(
     input: std::result::Result<Json<ModEnabledRequest>, JsonRejection>,
 ) -> Result<Json<ModsDocument>> {
     let input = json(input)?;
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    let document = current(&app, &input.revision)?;
-    let selected = document
-        .mods
-        .iter()
-        .find(|item| item.name == name)
-        .ok_or_else(|| Error::bad("Mod not installed"))?;
-    let path = directory(&app)?;
-    let (mut mod_list, _) = read_list(&path)?;
-    set_entry(&mut mod_list, &name, input.enabled, &selected.version);
-    let mut candidates = document.mods.clone();
-    for candidate in &mut candidates {
-        if candidate.name == name {
-            candidate.enabled = input.enabled;
+    mutation(&app, move |app, engine| {
+        let document = current(&app, &input.revision)?;
+        let selected = document
+            .mods
+            .iter()
+            .find(|item| item.name == name)
+            .ok_or_else(|| Error::bad("Mod not installed"))?;
+        let path = directory(&app)?;
+        let (mut mod_list, _) = read_list(&path)?;
+        set_entry(&mut mod_list, &name, input.enabled, &selected.version);
+        let mut candidates = document.mods.clone();
+        for candidate in &mut candidates {
+            if candidate.name == name {
+                candidate.enabled = input.enabled;
+            }
         }
-    }
-    let engine = known_engine(&inner)?;
-    check_enabled_compatibility(&candidates, engine)?;
-    check_dependencies(&candidates, &mod_list, Some(engine), &bundled_mods(&app)?)?;
-    storage::atomic_write(
-        &path.join("mod-list.json"),
-        &serde_json::to_vec_pretty(&mod_list)?,
-        true,
-    )?;
-    Ok(Json(list(&app)?))
+        let engine = checked_engine(engine.as_deref())?;
+        check_enabled_compatibility(&candidates, engine)?;
+        check_dependencies(&candidates, &mod_list, Some(engine), &bundled_mods(&app)?)?;
+        storage::atomic_write(
+            &path.join("mod-list.json"),
+            &serde_json::to_vec_pretty(&mod_list)?,
+            true,
+        )?;
+        Ok(Json(list(&app)?))
+    })
+    .await
 }
 #[utoipa::path(get, path="/api/mods/settings", responses((status=200, body=ModSettingsDocument), (status=400, body=ApiError)))]
 pub async fn get_mod_settings(State(app): State<App>) -> Result<Json<ModSettingsDocument>> {
-    let _guard = app.inner.lock().await;
-    Ok(Json(mod_settings::read(
-        &directory(&app)?.join("mod-settings.dat"),
-    )?))
+    app.mod_storage(move |app| {
+        Ok(Json(mod_settings::read(
+            &directory(&app)?.join("mod-settings.dat"),
+        )?))
+    })
+    .await
 }
 #[utoipa::path(put, path="/api/mods/settings", request_body=ModSettingsPatch, responses((status=200, body=ModSettingsDocument), (status=400, body=ApiError), (status=409, body=ApiError)))]
 pub async fn put_mod_settings(
@@ -924,35 +1028,36 @@ pub async fn put_mod_settings(
     input: std::result::Result<Json<ModSettingsPatch>, JsonRejection>,
 ) -> Result<Json<ModSettingsDocument>> {
     let input = json(input)?;
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    workflows::ensure_consistent(&app)?;
-    Ok(Json(mod_settings::update(
-        &directory(&app)?.join("mod-settings.dat"),
-        input,
-    )?))
+    mutation(&app, move |app, _engine| {
+        workflows::ensure_consistent(&app)?;
+        Ok(Json(mod_settings::update(
+            &directory(&app)?.join("mod-settings.dat"),
+            input,
+        )?))
+    })
+    .await
 }
 #[utoipa::path(get, path="/api/mods/settings/file", responses((status=200, content_type="application/octet-stream"), (status=404, body=ApiError)))]
 pub async fn download_settings(State(app): State<App>) -> Result<Response> {
-    let _guard = app.inner.lock().await;
-    let bytes =
-        mod_settings::read_bytes(&directory(&app)?.join("mod-settings.dat"))?.ok_or_else(|| {
-            Error {
+    app.mod_storage(move |app| {
+        let bytes = mod_settings::read_bytes(&directory(&app)?.join("mod-settings.dat"))?
+            .ok_or_else(|| Error {
                 status: StatusCode::NOT_FOUND,
                 message: "No mod-settings.dat exists yet".into(),
-            }
-        })?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/octet-stream"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"mod-settings.dat\"",
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
+            })?;
+        Ok((
+            [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"mod-settings.dat\"",
+                ),
+            ],
+            bytes,
+        )
+            .into_response())
+    })
+    .await
 }
 #[utoipa::path(post, path="/api/mods/settings/file", params(("If-Match"=String, Header)), request_body(content=String, content_type="application/octet-stream"), responses((status=200, body=ModSettingsDocument), (status=400, body=ApiError), (status=409, body=ApiError)))]
 pub async fn upload_settings(
@@ -961,14 +1066,15 @@ pub async fn upload_settings(
     bytes: std::result::Result<Bytes, BytesRejection>,
 ) -> Result<Json<ModSettingsDocument>> {
     let bytes = body(bytes)?;
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    workflows::ensure_consistent(&app)?;
-    Ok(Json(mod_settings::replace(
-        &directory(&app)?.join("mod-settings.dat"),
-        expected(&headers)?,
-        &bytes,
-    )?))
+    mutation(&app, move |app, _engine| {
+        workflows::ensure_consistent(&app)?;
+        Ok(Json(mod_settings::replace(
+            &directory(&app)?.join("mod-settings.dat"),
+            expected(&headers)?,
+            &bytes,
+        )?))
+    })
+    .await
 }
 
 #[derive(Clone, Deserialize)]
@@ -1190,17 +1296,19 @@ pub async fn get_updates(
     State(app): State<App>,
     Path(name): Path<String>,
 ) -> Result<Json<ModUpdates>> {
-    let (installed, engine, authenticated) = {
-        let inner = app.inner.lock().await;
-        let document = list(&app)?;
-        let installed = document
-            .mods
-            .into_iter()
-            .find(|item| item.name == name)
-            .ok_or_else(|| Error::bad("Mod not installed"))?;
-        let engine = known_engine(&inner)?.to_owned();
-        (installed, engine, document.portal_authenticated)
-    };
+    let engine = known_engine(&*app.inner.lock().await)?.to_owned();
+    let lookup = name.clone();
+    let (installed, authenticated) = app
+        .mod_storage(move |app| {
+            let document = list(&app)?;
+            let installed = document
+                .mods
+                .into_iter()
+                .find(|item| item.name == lookup)
+                .ok_or_else(|| Error::bad("Mod not installed"))?;
+            Ok((installed, document.portal_authenticated))
+        })
+        .await?;
     let _permit = UPDATE_CHECKS
         .acquire()
         .await
@@ -1220,23 +1328,23 @@ pub async fn update_mod(
     input: std::result::Result<Json<ModUpdateRequest>, JsonRejection>,
 ) -> Result<Json<ModsDocument>> {
     let input = json(input)?;
-    let (installed, engine, username, token) = {
-        let inner = app.inner.lock().await;
-        stopped(&inner)?;
-        let document = current(&app, &input.revision)?;
+    let lookup = name.clone();
+    let revision = input.revision.clone();
+    let (installed, engine) = mutation(&app, move |app, engine| {
+        let engine = checked_engine(engine.as_deref())?.to_owned();
+        let document = current(&app, &revision)?;
+        credentials(&app)?.ok_or_else(|| Error::bad("Portal downloads require Factorio username/token in server settings or FACTORIO_USERNAME/FACTORIO_TOKEN. You can upload a newer ZIP without credentials."))?;
         let installed = document
             .mods
             .into_iter()
-            .find(|item| item.name == name)
+            .find(|item| item.name == lookup)
             .ok_or_else(|| Error::bad("Mod not installed"))?;
-        let engine = known_engine(&inner)?.to_owned();
-        let (username, token) = credentials(&app)?.ok_or_else(|| Error::bad("Portal downloads require Factorio username/token in server settings or FACTORIO_USERNAME/FACTORIO_TOKEN. You can upload a newer ZIP without credentials."))?;
-        (installed, engine, username, token)
-    };
-    let client = client()?;
-    let releases = full_releases(&client, &name).await?;
+        Ok((installed, engine))
+    })
+    .await?;
+    let releases = full_releases(&client()?, &name).await?;
     let installed_version = version(&installed.version)?;
-    let release = newest(&releases, &engine)
+    newest(&releases, &engine)
         .filter(|release| {
             release.version == input.version
                 && version(&release.version).is_ok_and(|candidate| candidate > installed_version)
@@ -1246,42 +1354,9 @@ pub async fn update_mod(
                 "Requested update is no longer the latest compatible release. Check updates again",
             )
         })?;
-    let mut url = url::Url::parse("https://mods.factorio.com")
-        .map_err(|_| Error::bad("Invalid mod portal base URL"))?;
-    if !release.download_url.starts_with("/download/")
-        || release.download_url.contains(['?', '#', '\\'])
-        || release.download_url.contains("..")
-    {
-        return Err(Error::bad("Invalid mod portal download path"));
-    }
-    url.set_path(&release.download_url);
-    url.query_pairs_mut()
-        .append_pair("username", &username)
-        .append_pair("token", &token);
-    let response = client.get(url).send().await.map_err(|_| Error {
-        status: StatusCode::BAD_GATEWAY,
-        message: "Could not download mod from the Factorio portal".into(),
-    })?;
-    let bytes = response_bytes(response, MAX_ARCHIVE).await?;
-    if release.sha1.to_ascii_lowercase() != format!("{:x}", sha1::Sha1::digest(&bytes)) {
-        return Err(Error::bad(
-            "Downloaded mod checksum does not match the portal",
-        ));
-    }
-    let info = validate_archive(&bytes)?;
-    if info.name != name || info.version != input.version {
-        return Err(Error::bad(
-            "Downloaded mod identity does not match the selected release",
-        ));
-    }
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    Ok(Json(install(
-        &app,
-        &input.revision,
-        &bytes,
-        Some(known_engine(&inner)?),
-    )?))
+    Ok(Json(
+        workflows::apply_changes(&app, &input.revision, &[(name, input.version)]).await?,
+    ))
 }
 
 #[cfg(test)]

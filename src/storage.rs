@@ -340,6 +340,46 @@ pub fn update_admins(path: &Path, document: AdminsDocument) -> Result<AdminsDocu
     atomic_write(path, &serde_json::to_vec_pretty(&document.admins)?, true)?;
     admins(path)
 }
+pub fn validate_whitelist_choice(manager: &Path, whitelist: &Path) -> Result<()> {
+    let (_, settings) = read_document(manager)?;
+    let explicit = settings
+        .as_deref()
+        .map(serde_json::from_slice::<Value>)
+        .transpose()?
+        .is_some_and(|settings| settings.get("use_server_whitelist").is_some());
+    if !explicit && let Some(bytes) = read_document(whitelist)?.1 {
+        let entries: Vec<String> = serde_json::from_slice(&bytes)?;
+        if !entries.is_empty() {
+            return Err(Error::conflict(
+                "A server whitelist exists. Explicitly enable or disable it in Manager settings before starting",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn prepare_player_lists(whitelist: &Path, banlist: &Path, use_whitelist: bool) -> Result<()> {
+    for path in [whitelist, banlist] {
+        let (_, bytes) = read_document(path)?;
+        if let Some(bytes) = bytes {
+            let value: Value = serde_json::from_slice(&bytes)?;
+            let entries = value
+                .as_array()
+                .ok_or_else(|| Error::bad("Player lists must be JSON arrays"))?;
+            if path == whitelist && entries.iter().any(|entry| !entry.is_string()) {
+                return Err(Error::bad("Server whitelist must contain player names"));
+            }
+        } else if path == whitelist && use_whitelist {
+            return Err(Error::bad(
+                "Create server-whitelist.json before enabling the server whitelist",
+            ));
+        } else {
+            atomic_write(path, b"[]\n", false)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn save_path(directory: &Path, name: &str) -> Result<PathBuf> {
     ensure_directory(directory)?;
     if name.is_empty()
@@ -394,7 +434,8 @@ pub fn saves(directory: &Path) -> Result<Vec<Save>> {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if name.to_ascii_lowercase().ends_with(".zip") {
+        let lowercase = name.to_ascii_lowercase();
+        if lowercase.ends_with(".zip") && !lowercase.ends_with(".tmp.zip") {
             result.push(save_info(directory, &name)?);
         }
     }
@@ -492,13 +533,15 @@ fn archive_root(directory: &Path) -> Result<PathBuf> {
     ensure_directory(&root)?;
     Ok(root)
 }
-fn archive_directory(directory: &Path, id: &str) -> Result<PathBuf> {
-    if !id.starts_with("archive-")
-        || id.len() > 80
-        || !id
+fn archive_identifier(id: &str) -> bool {
+    id.starts_with("archive-")
+        && id.len() <= 80
+        && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
+}
+fn archive_directory(directory: &Path, id: &str) -> Result<PathBuf> {
+    if !archive_identifier(id) {
         return Err(Error::bad("Invalid archive identifier"));
     }
     let path = archive_root(directory)?.join(id);
@@ -515,6 +558,9 @@ pub fn archived_saves(directory: &Path) -> Result<Vec<ArchivedSave>> {
         let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
+        if !archive_identifier(&id) {
+            continue;
+        }
         let path = archive_directory(directory, &id)?;
         for save in saves(&path)? {
             result.push(ArchivedSave {

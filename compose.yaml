@@ -10,6 +10,7 @@ services:
     environment:
       FC_BIND: 0.0.0.0:8080
       FC_PUBLIC_URL: ${FC_PUBLIC_URL:?Set FC_PUBLIC_URL to the HTTPS origin of your reverse proxy}
+      FC_TRUSTED_PROXIES: ${FC_TRUSTED_PROXIES:?Set the exact trusted reverse-proxy IP addresses}
     read_only: true
     tmpfs:
       - /tmp

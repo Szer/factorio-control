@@ -276,7 +276,7 @@ async fn create_world_uses_isolated_runtime_no_overwrite_and_validates_output() 
     let binary = dir.path().join("fake-factorio");
     script(&binary, &format!("test \\\"$1\\\" = --create || exit 4\ncp '{}' \\\"$2\\\"\nprintf changed > mods/mod-list.json", dir.path().join("fixture.zip").display()).replace("\\\"", "\""))?;
     let app = App::new(dir.path().join("data"), Some(binary.clone())).map_err(failure)?;
-    fs::create_dir(app.directory.join("mods"))?;
+    fs::create_dir_all(app.directory.join("mods"))?;
     fs::write(app.directory.join("mods/mod-list.json"), br#"{"mods":[]}"#)?;
     let (status, _) = post(
         &app,
@@ -396,7 +396,7 @@ async fn create_operation_gate_blocks_launch_without_blocking_status() -> TestRe
 }
 
 #[tokio::test]
-async fn interrupted_mod_transaction_blocks_launch_even_when_version_is_unknown() -> TestResult {
+async fn malformed_mod_transaction_blocks_launch_even_when_version_is_unknown() -> TestResult {
     let dir = tempfile::tempdir()?;
     let binary = dir.path().join("fake-factorio");
     script(&binary, "touch launched; exit 0")?;
@@ -404,11 +404,9 @@ async fn interrupted_mod_transaction_blocks_launch_even_when_version_is_unknown(
     world(&app.saves_path().join("world.zip"))?;
     fs::write(app.directory.join("mod-transaction.json"), b"{}")?;
     let start = process::start(&app, "world.zip").await;
-    assert!(
-        matches!(start, Err(error) if error.status == StatusCode::CONFLICT && error.message.contains("interrupted"))
-    );
+    assert!(matches!(start, Err(error) if error.status == StatusCode::BAD_REQUEST));
     let create = process::create_save(&app, "new.zip").await;
-    assert!(matches!(create, Err(error) if error.status == StatusCode::CONFLICT));
+    assert!(matches!(create, Err(error) if error.status == StatusCode::BAD_REQUEST));
     assert!(!app.directory.join("launched").exists());
     assert!(!app.saves_path().join("new.zip").exists());
     Ok(())
@@ -434,5 +432,175 @@ fn runtime_paths_reads_only_path_keys_and_rejects_oversized_or_linked_config() -
         &axum::http::Method::GET,
         "/api/runtime-paths"
     ));
+    Ok(())
+}
+
+#[test]
+fn temporary_saves_and_foreign_archive_directories_do_not_break_recovery() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let app = App::new(dir.path().into(), None).map_err(failure)?;
+    world(&app.saves_path().join("world.zip"))?;
+    fs::write(app.saves_path().join("_autosave1.tmp.zip"), b"incomplete")?;
+    fs::write(app.saves_path().join("_autosave2.TMP.ZIP"), b"incomplete")?;
+    let selected = storage::selected_save(
+        &SaveSelectionDocument {
+            revision: "missing".into(),
+            save: None,
+            load_latest: true,
+        },
+        &app.saves_path(),
+    )
+    .map_err(failure)?;
+    assert_eq!(selected, "world.zip");
+    assert_eq!(storage::saves(&app.saves_path()).map_err(failure)?.len(), 1);
+    let archived = storage::archive_save(
+        &app.directory,
+        "world.zip",
+        &storage::save_info(&app.saves_path(), "world.zip")
+            .map_err(failure)?
+            .revision,
+    )
+    .map_err(failure)?;
+    fs::create_dir(app.directory.join("archived-saves/lost+found"))?;
+    let listing = storage::archived_saves(&app.directory).map_err(failure)?;
+    assert_eq!(listing.len(), 1);
+    assert_eq!(listing[0].id, archived.id);
+    Ok(())
+}
+
+#[test]
+fn player_lists_validate_without_rewriting_migrated_content() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let whitelist = dir.path().join("server-whitelist.json");
+    let banlist = dir.path().join("server-banlist.json");
+    assert!(storage::prepare_player_lists(&whitelist, &banlist, true).is_err());
+    let content = br#"["allowed-player"]"#;
+    fs::write(&whitelist, content)?;
+    assert!(
+        storage::validate_whitelist_choice(&dir.path().join("manager-settings.json"), &whitelist)
+            .is_err()
+    );
+    fs::write(
+        dir.path().join("manager-settings.json"),
+        br#"{"use_server_whitelist":false}"#,
+    )?;
+    storage::validate_whitelist_choice(&dir.path().join("manager-settings.json"), &whitelist)
+        .map_err(failure)?;
+    let banned = br#"[{"username":"banned-player","reason":"fixture"}]"#;
+    fs::write(&banlist, banned)?;
+    storage::prepare_player_lists(&whitelist, &banlist, true).map_err(failure)?;
+    assert_eq!(fs::read(&whitelist)?, content);
+    assert_eq!(fs::read(&banlist)?, banned);
+    fs::write(&whitelist, b"{}")?;
+    assert!(storage::prepare_player_lists(&whitelist, &banlist, true).is_err());
+    fs::remove_file(&whitelist)?;
+    symlink(&banlist, &whitelist)?;
+    assert!(storage::prepare_player_lists(&whitelist, &banlist, false).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn migrated_player_lists_have_explicit_paths_and_whitelist_switch() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let binary = dir.path().join("fake-factorio");
+    script(
+        &binary,
+        "printf '%s\\n' \"$@\" > args.txt\nwhile :; do sleep 0.1; done",
+    )?;
+    let app = App::new(dir.path().join("data"), Some(binary)).map_err(failure)?;
+    world(&app.saves_path().join("world.zip"))?;
+    fs::write(
+        app.directory.join("server-whitelist.json"),
+        br#"["allowed"]"#,
+    )?;
+    fs::write(
+        app.directory.join("server-banlist.json"),
+        br#"[{"username":"banned","reason":"fixture"}]"#,
+    )?;
+    for enabled in [true, false] {
+        let mut settings =
+            storage::manager_settings(&app.manager_settings_path()).map_err(failure)?;
+        settings.settings.use_server_whitelist = enabled;
+        storage::update_manager_settings(&app.manager_settings_path(), settings)
+            .map_err(failure)?;
+        process::start(&app, "world.zip").await.map_err(failure)?;
+        let path = app.directory.join("args.txt");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let arguments = fs::read_to_string(&path)?;
+        let args: Vec<_> = arguments.lines().collect();
+        assert!(args.windows(2).any(|p| p
+            == [
+                "--use-server-whitelist",
+                if enabled { "true" } else { "false" }
+            ]));
+        for (flag, name) in [
+            ("--server-whitelist", "server-whitelist.json"),
+            ("--server-banlist", "server-banlist.json"),
+        ] {
+            let expected = app.directory.join(name);
+            assert!(
+                args.windows(2)
+                    .any(|p| p[0] == flag && Some(p[1]) == expected.to_str())
+            );
+        }
+        process::force_stop(&app, true).await.map_err(failure)?;
+        while app.inner.lock().await.child.is_some() {
+            process::poll(&app).await;
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn blocked_console_pipe_does_not_block_status_or_emergency_stop() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let binary = dir.path().join("fake-factorio");
+    script(
+        &binary,
+        "echo 'ServerMultiplayerManager to(InGame)'\nexec sleep 10",
+    )?;
+    let app = App::new(dir.path().join("data"), Some(binary)).map_err(failure)?;
+    world(&app.saves_path().join("world.zip"))?;
+    fs::write(app.settings_path(), br#"{"auto_pause":false}"#)?;
+    process::start(&app, "world.zip").await.map_err(failure)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while app.inner.lock().await.status.state != ServerState::Running {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let writer_app = app.clone();
+    let writer = tokio::spawn(async move {
+        for _ in 0..128 {
+            process::send_command(
+                &writer_app,
+                ConsoleCommandRequest {
+                    command: "x".repeat(4096),
+                    acknowledge_scripting: false,
+                },
+            )
+            .await?;
+        }
+        Ok::<_, factorio_control::Error>(())
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !writer.is_finished(),
+        "fixture must fill the child's unread pipe"
+    );
+    let inner = tokio::time::timeout(Duration::from_millis(200), app.inner.lock()).await?;
+    assert_eq!(inner.status.state, ServerState::Running);
+    drop(inner);
+    tokio::time::timeout(Duration::from_millis(200), process::force_stop(&app, true))
+        .await?
+        .map_err(failure)?;
+    assert!(writer.await?.is_err());
+    process::shutdown(&app).await;
     Ok(())
 }
