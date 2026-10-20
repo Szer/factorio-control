@@ -1,0 +1,21 @@
+services:
+  control:
+    build:
+      context: .
+      args:
+        FACTORIO_VERSION: ${FACTORIO_VERSION:-2.1.23}
+    image: factorio-control:local
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 150s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - factory-data:/data
+volumes:
+  factory-data:

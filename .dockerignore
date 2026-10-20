@@ -1,0 +1,7 @@
+.git
+.cache
+data
+target
+web/node_modules
+web/dist
+factorio-control*.jpg
