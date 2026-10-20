@@ -947,9 +947,6 @@ pub async fn packs(State(app): State<App>) -> Result<Json<Vec<PackSummary>>> {
             {
                 continue;
             }
-            if result.len() >= 100 {
-                return Err(Error::bad("Too many mod packs"));
-            }
             let name = file
                 .file_name()
                 .to_string_lossy()
@@ -957,6 +954,9 @@ pub async fn packs(State(app): State<App>) -> Result<Json<Vec<PackSummary>>> {
                 .to_owned();
             if !valid_name(&name) || name.len() > 64 {
                 continue;
+            }
+            if result.len() >= 100 {
+                return Err(Error::bad("Too many mod packs"));
             }
             let (pack, revision) = read_pack(&app, &name)?;
             result.push(PackSummary {
