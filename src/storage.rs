@@ -206,6 +206,16 @@ pub fn update_raw_settings(
     raw_settings(path)
 }
 fn validate_manager_settings(settings: &ManagerSettings) -> Result<()> {
+    if settings
+        .game_bind_address
+        .parse::<std::net::IpAddr>()
+        .is_err()
+        || settings.game_port == 0
+    {
+        return Err(Error::bad(
+            "Game bind address must be an IP address and port must be 1–65535",
+        ));
+    }
     if !(1..=60).contains(&settings.poll_interval_seconds)
         || !(1..=1440).contains(&settings.ups_history_minutes)
     {
@@ -240,17 +250,45 @@ pub fn update_manager_settings(
 }
 pub fn save_selection(path: &Path) -> Result<SaveSelectionDocument> {
     let (revision, bytes) = read_document(path)?;
-    let save = match bytes {
-        Some(bytes) => serde_json::from_slice(&bytes)?,
-        None => None,
+    let (save, load_latest) = match bytes {
+        Some(bytes) => {
+            let value: Value = serde_json::from_slice(&bytes)?;
+            if value.is_object() {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Selection {
+                    save: Option<String>,
+                    load_latest: bool,
+                }
+                let selection: Selection = serde_json::from_value(value)?;
+                (selection.save, selection.load_latest)
+            } else {
+                (serde_json::from_value(value)?, false)
+            }
+        }
+        None => (None, false),
     };
-    Ok(SaveSelectionDocument { revision, save })
+    if load_latest && save.is_some() {
+        return Err(Error::bad(
+            "Latest-save mode cannot also select a fixed save",
+        ));
+    }
+    Ok(SaveSelectionDocument {
+        revision,
+        save,
+        load_latest,
+    })
 }
 pub fn update_save_selection(
     path: &Path,
     saves: &Path,
     document: SaveSelectionDocument,
 ) -> Result<SaveSelectionDocument> {
+    if document.load_latest && document.save.is_some() {
+        return Err(Error::bad(
+            "Latest-save mode cannot also select a fixed save",
+        ));
+    }
     if let Some(name) = &document.save {
         save_info(saves, name)?;
     }
@@ -260,7 +298,10 @@ pub fn update_save_selection(
             "Selected save changed on disk. Reload before saving",
         ));
     }
-    write_configuration(path, &document.save)?;
+    write_configuration(
+        path,
+        &serde_json::json!({"save": document.save, "load_latest": document.load_latest}),
+    )?;
     save_selection(path)
 }
 pub fn admins(path: &Path) -> Result<AdminsDocument> {
@@ -316,7 +357,23 @@ pub fn save_path(directory: &Path, name: &str) -> Result<PathBuf> {
 }
 pub fn save_info(directory: &Path, name: &str) -> Result<Save> {
     let meta = fs::metadata(save_path(directory, name)?)?;
+    use std::os::unix::fs::MetadataExt;
+    let revision = format!(
+        "{:x}",
+        Sha256::digest(
+            format!(
+                "{}:{}:{}:{}:{}",
+                meta.dev(),
+                meta.ino(),
+                meta.len(),
+                meta.mtime(),
+                meta.mtime_nsec()
+            )
+            .as_bytes()
+        )
+    );
     Ok(Save {
+        revision,
         name: name.into(),
         size_bytes: meta.len(),
         modified_at: meta
@@ -407,4 +464,195 @@ pub fn log_redactions(path: &Path) -> Result<Vec<String>> {
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     secrets.dedup();
     Ok(secrets)
+}
+
+pub fn selected_save(selection: &SaveSelectionDocument, directory: &Path) -> Result<String> {
+    if selection.load_latest {
+        let mut latest: Option<(std::time::SystemTime, String)> = None;
+        for save in saves(directory)? {
+            let modified = fs::metadata(save_path(directory, &save.name)?)?.modified()?;
+            if latest.as_ref().is_none_or(|(time, name)| {
+                modified > *time || (modified == *time && save.name < *name)
+            }) {
+                latest = Some((modified, save.name));
+            }
+        }
+        return latest
+            .map(|(_, name)| name)
+            .ok_or_else(|| Error::bad("No saves are available"));
+    }
+    selection
+        .save
+        .clone()
+        .ok_or_else(|| Error::bad("Select a save before starting the server"))
+}
+fn archive_root(directory: &Path) -> Result<PathBuf> {
+    let root = directory.join("archived-saves");
+    fs::create_dir_all(&root)?;
+    ensure_directory(&root)?;
+    Ok(root)
+}
+fn archive_directory(directory: &Path, id: &str) -> Result<PathBuf> {
+    if !id.starts_with("archive-")
+        || id.len() > 80
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(Error::bad("Invalid archive identifier"));
+    }
+    let path = archive_root(directory)?.join(id);
+    ensure_directory(&path)?;
+    Ok(path)
+}
+pub fn archived_saves(directory: &Path) -> Result<Vec<ArchivedSave>> {
+    let mut result = Vec::new();
+    for entry in fs::read_dir(archive_root(directory)?)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let path = archive_directory(directory, &id)?;
+        for save in saves(&path)? {
+            result.push(ArchivedSave {
+                id: id.clone(),
+                name: save.name,
+                size_bytes: save.size_bytes,
+                modified_at: save.modified_at,
+                revision: save.revision,
+            });
+        }
+    }
+    result.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then(a.name.cmp(&b.name)));
+    Ok(result)
+}
+pub fn archive_save(directory: &Path, name: &str, revision: &str) -> Result<ArchivedSave> {
+    let saves = directory.join("saves");
+    let save = save_info(&saves, name)?;
+    if save.revision != revision {
+        return Err(Error::conflict(
+            "Save changed on disk. Reload before archiving",
+        ));
+    }
+    let root = archive_root(directory)?;
+    let temporary = tempfile::Builder::new()
+        .prefix("archive-")
+        .tempdir_in(&root)?;
+    let id = temporary
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::bad("Invalid archive identifier"))?
+        .to_owned();
+    fs::rename(save_path(&saves, name)?, temporary.path().join(name))?;
+    // Retain the directory only after the save has moved successfully.
+    let kept = temporary.keep();
+    fs::File::open(&kept)?.sync_all()?;
+    fs::File::open(&saves)?.sync_all()?;
+    fs::File::open(root)?.sync_all()?;
+    Ok(ArchivedSave {
+        id,
+        name: save.name,
+        size_bytes: save.size_bytes,
+        modified_at: save.modified_at,
+        revision: save.revision,
+    })
+}
+pub fn restore_save(directory: &Path, id: &str, revision: &str) -> Result<Save> {
+    let archive = archive_directory(directory, id)?;
+    let entries = saves(&archive)?;
+    if entries.len() != 1 {
+        return Err(Error::bad("Archive must contain exactly one save"));
+    }
+    let save = entries
+        .first()
+        .ok_or_else(|| Error::bad("Archive is empty"))?;
+    if save.revision != revision {
+        return Err(Error::conflict(
+            "Archived save changed on disk. Reload before restoring",
+        ));
+    }
+    let destination = directory.join("saves");
+    let path = save_path(&destination, &save.name)?;
+    let source = save_path(&archive, &save.name)?;
+    fs::hard_link(&source, &path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::conflict("A save with that name already exists")
+        } else {
+            error.into()
+        }
+    })?;
+    fs::File::open(&destination)?.sync_all()?;
+    fs::remove_file(source)?;
+    fs::remove_dir(archive)?;
+    fs::File::open(archive_root(directory)?)?.sync_all()?;
+    save_info(&destination, &save.name)
+}
+pub fn game_log(directory: &Path, settings: &Path) -> Result<GameLogDocument> {
+    use std::io::{Seek, SeekFrom};
+    const LIMIT: u64 = 256 * 1024;
+    let path = directory.join("factorio-current.log");
+    ensure_regular(&path)?;
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(GameLogDocument {
+                name: "factorio-current.log".into(),
+                content: String::new(),
+                truncated: false,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let length = file.metadata()?.len();
+    let truncated = length > LIMIT;
+    if truncated {
+        file.seek(SeekFrom::Start(length - LIMIT))?;
+    }
+    let mut bytes = Vec::new();
+    file.take(LIMIT).read_to_end(&mut bytes)?;
+    if truncated {
+        bytes = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or_else(Vec::new, |position| bytes[position + 1..].to_vec());
+    }
+    let mut content = String::from_utf8_lossy(&bytes)
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .collect::<String>();
+    for secret in log_redactions(settings)? {
+        content = content.replace(&secret, "[redacted]");
+    }
+    // Authentication lines can contain expired credentials absent from current settings.
+    content = content
+        .lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if [
+                "token",
+                "password",
+                "authorization",
+                "authenticate",
+                "api-key",
+                "api_key",
+            ]
+            .iter()
+            .any(|key| lower.contains(key))
+            {
+                "[authentication detail redacted]"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(GameLogDocument {
+        name: "factorio-current.log".into(),
+        content,
+        truncated,
+    })
 }

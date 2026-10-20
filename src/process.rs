@@ -1,11 +1,15 @@
 use crate::{App, Error, Result, log, models::*, now, storage, telemetry};
 use std::{os::unix::process::ExitStatusExt, process::Stdio, time::Duration};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
 };
 
 pub async fn start(app: &App, name: &str) -> Result<Status> {
+    let _operation = app
+        .save_operations
+        .try_lock()
+        .map_err(|_| Error::conflict("A save operation is in progress"))?;
     let mut inner = app.inner.lock().await;
     if inner.child.is_some() {
         return Err(Error::conflict("The server is already active"));
@@ -49,12 +53,17 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
     }
     std::fs::create_dir_all(app.directory.join("mods"))?;
     storage::ensure_directory(&app.directory.join("mods"))?;
+    let manager = storage::manager_settings(&app.manager_settings_path())?.settings;
     let mut command = Command::new(binary);
     session.configure(&mut command);
     command
         .current_dir(&app.directory)
         .args(["--start-server"])
         .arg(save)
+        .arg("--bind")
+        .arg(manager.game_bind_address)
+        .arg("--port")
+        .arg(manager.game_port.to_string())
         .arg("--mod-directory")
         .arg(app.directory.join("mods"))
         .arg("--server-settings")
@@ -344,4 +353,213 @@ pub async fn shutdown(app: &App) {
     {
         eprintln!("Final server shutdown failed: {error}");
     }
+}
+
+pub async fn start_selected(app: &App, name: Option<&str>) -> Result<Status> {
+    let name = match name {
+        Some(name) => name.to_owned(),
+        None => {
+            let _inner = app.inner.lock().await;
+            storage::selected_save(
+                &storage::save_selection(&app.save_selection_path())?,
+                &app.saves_path(),
+            )?
+        }
+    };
+    start(app, &name).await
+}
+pub fn validate_command(input: &ConsoleCommandRequest) -> Result<()> {
+    if input.command.trim().is_empty()
+        || input.command.len() > 4096
+        || input.command.chars().any(char::is_control)
+    {
+        return Err(Error::bad(
+            "Command must be a single nonempty line of at most 4096 bytes without control characters",
+        ));
+    }
+    let command = input
+        .command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let safe = [
+        "/help",
+        "/h",
+        "/players",
+        "/p",
+        "/admins",
+        "/version",
+        "/time",
+        "/evolution",
+        "/seed",
+    ];
+    if command.starts_with('/') && !safe.contains(&command.as_str()) && !input.acknowledge_scripting
+    {
+        return Err(Error::bad(
+            "Acknowledge that console commands can change the world or disable achievements",
+        ));
+    }
+    Ok(())
+}
+pub async fn send_command(app: &App, input: ConsoleCommandRequest) -> Result<CommandResponse> {
+    validate_command(&input)?;
+    let mut inner = app.inner.lock().await;
+    if !matches!(
+        inner.status.state,
+        ServerState::Running | ServerState::Paused
+    ) {
+        return Err(Error::conflict("Commands require a running server"));
+    }
+    let stdin = inner
+        .child
+        .as_mut()
+        .and_then(|child| child.stdin.as_mut())
+        .ok_or_else(|| Error::conflict("Server console is unavailable"))?;
+    let line = format!("{}\n", input.command);
+    match tokio::time::timeout(Duration::from_secs(2), stdin.write_all(line.as_bytes())).await {
+        Ok(Ok(())) => Ok(CommandResponse { accepted: true }),
+        Ok(Err(_)) => {
+            if let Some(child) = inner.child.as_mut() {
+                child.stdin.take();
+            }
+            Err(Error::conflict(
+                "Unable to write to the server console; restart before sending commands",
+            ))
+        }
+        Err(_) => {
+            // A timed out write may be partial; prevent a later command from completing it.
+            if let Some(child) = inner.child.as_mut() {
+                child.stdin.take();
+            }
+            Err(Error::conflict(
+                "Server console write timed out; restart the server before sending commands",
+            ))
+        }
+    }
+}
+pub async fn force_stop(app: &App, confirm: bool) -> Result<Status> {
+    if !confirm {
+        return Err(Error::bad(
+            "Confirm emergency termination; unsaved progress will be lost",
+        ));
+    }
+    let mut inner = app.inner.lock().await;
+    let child = inner
+        .child
+        .as_mut()
+        .ok_or_else(|| Error::conflict("The server is not active"))?;
+    child.start_kill()?;
+    inner.status.state = ServerState::Stopping;
+    inner.status.since = now();
+    inner.status.error =
+        Some("Server was forcibly terminated; unsaved progress may be lost".into());
+    inner.stopping_at = None;
+    log(
+        &mut inner,
+        LogLevel::Warn,
+        "Emergency server termination requested".into(),
+    );
+    Ok(inner.status.clone())
+}
+pub async fn create_save(app: &App, name: &str) -> Result<Save> {
+    let _operation = app
+        .save_operations
+        .try_lock()
+        .map_err(|_| Error::conflict("A save operation is in progress"))?;
+    let temporary = {
+        let inner = app.inner.lock().await;
+        if inner.child.is_some() {
+            return Err(Error::conflict("Stop the server before creating a save"));
+        }
+        let destination = storage::save_path(&app.saves_path(), name)?;
+        if destination.exists() {
+            return Err(Error::conflict("A save with that name already exists"));
+        }
+        if let Some(version) = inner.status.version.as_deref() {
+            crate::mods::validate_start(app, version)?;
+        }
+        let temporary = tempfile::Builder::new()
+            .prefix(".create-")
+            .tempdir_in(&app.directory)?;
+        let mods = temporary.path().join("mods");
+        std::fs::create_dir(&mods)?;
+        let source = app.directory.join("mods");
+        if source.exists() {
+            storage::ensure_directory(&source)?;
+            for entry in std::fs::read_dir(source)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if name.ends_with(".zip") || matches!(name, "mod-list.json" | "mod-settings.dat") {
+                    storage::ensure_regular(&entry.path())?;
+                    std::fs::copy(entry.path(), mods.join(name))?;
+                }
+            }
+        }
+        let data = temporary
+            .path()
+            .to_str()
+            .ok_or_else(|| Error::bad("Data directory must be UTF-8"))?;
+        if data.contains(['\n', '\r']) {
+            return Err(Error::bad("Data directory contains a newline"));
+        }
+        storage::atomic_write(
+            &temporary.path().join("config.ini"),
+            format!("[path]\nread-data=__PATH__executable__/../../data\nwrite-data={data}\n")
+                .as_bytes(),
+            false,
+        )?;
+        temporary
+    };
+    let binary = app
+        .binary
+        .as_ref()
+        .ok_or_else(|| Error::bad("Configure FC_FACTORIO_BIN before creating a save"))?;
+    let output = temporary.path().join("world.zip");
+    let mut child = Command::new(binary)
+        .current_dir(temporary.path())
+        .arg("--create")
+        .arg(&output)
+        .arg("--mod-directory")
+        .arg(temporary.path().join("mods"))
+        .arg("--config")
+        .arg(temporary.path().join("config.ini"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let exit = match tokio::time::timeout(Duration::from_secs(180), child.wait()).await {
+        Ok(result) => result?,
+        Err(_) => {
+            child.kill().await?;
+            return Err(Error::bad("World creation exceeded three minutes"));
+        }
+    };
+    if !exit.success() {
+        return Err(Error::bad(&format!(
+            "Factorio could not create the world ({exit})"
+        )));
+    }
+    storage::ensure_regular(&output)?;
+    let mut file = std::fs::File::open(&output)?;
+    if file.metadata()?.len() > storage::MAX_SAVE_BYTES {
+        return Err(Error::bad("Created world exceeds 1 GiB"));
+    }
+    storage::validate_save_reader(&mut file)?;
+    file.sync_all()?;
+    let _inner = app.inner.lock().await;
+    let destination = storage::save_path(&app.saves_path(), name)?;
+    std::fs::hard_link(&output, destination).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::conflict("A save with that name already exists")
+        } else {
+            error.into()
+        }
+    })?;
+    std::fs::File::open(app.saves_path())?.sync_all()?;
+    storage::save_info(&app.saves_path(), name)
 }

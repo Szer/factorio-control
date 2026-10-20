@@ -31,6 +31,7 @@ pub struct Save {
     pub name: String,
     pub size_bytes: u64,
     pub modified_at: u64,
+    pub revision: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -133,15 +134,27 @@ pub struct RawSettingsDocument {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagerSettings {
+    #[serde(default = "default_game_address")]
+    pub game_bind_address: String,
+    #[serde(default = "default_game_port")]
+    pub game_port: u16,
     pub enable_script_telemetry: bool,
     #[schema(minimum = 1, maximum = 60)]
     pub poll_interval_seconds: u32,
     #[schema(minimum = 1, maximum = 1440)]
     pub ups_history_minutes: u32,
 }
+fn default_game_address() -> String {
+    "0.0.0.0".into()
+}
+fn default_game_port() -> u16 {
+    34197
+}
 impl Default for ManagerSettings {
     fn default() -> Self {
         Self {
+            game_bind_address: default_game_address(),
+            game_port: default_game_port(),
             enable_script_telemetry: false,
             poll_interval_seconds: 2,
             ups_history_minutes: 10,
@@ -157,6 +170,8 @@ pub struct ManagerSettingsDocument {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaveSelectionDocument {
+    #[serde(default)]
+    pub load_latest: bool,
     pub revision: String,
     #[serde(deserialize_with = "Option::deserialize")]
     #[schema(required = true)]
@@ -191,7 +206,48 @@ pub struct LogEntry {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StartRequest {
-    pub save: String,
+    #[serde(default)]
+    pub save: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSaveRequest {
+    pub name: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveRevisionRequest {
+    pub revision: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ArchivedSave {
+    pub id: String,
+    pub name: String,
+    pub size_bytes: u64,
+    pub modified_at: u64,
+    pub revision: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConsoleCommandRequest {
+    pub command: String,
+    #[serde(default)]
+    pub acknowledge_scripting: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct CommandResponse {
+    pub accepted: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ForceStopRequest {
+    pub confirm: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct GameLogDocument {
+    pub name: String,
+    pub content: String,
+    pub truncated: bool,
 }
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ApiError {

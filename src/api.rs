@@ -34,6 +34,13 @@ use utoipa::OpenApi;
         stop,
         upload,
         download,
+        create_save,
+        archive_save,
+        archived_saves,
+        restore_save,
+        command,
+        force_stop,
+        game_log,
         crate::mods::save_sync::plan,
         crate::mods::save_sync::apply,
         crate::mods::save_sync::progress,
@@ -65,6 +72,13 @@ use utoipa::OpenApi;
         LogEntry,
         LogLevel,
         StartRequest,
+        CreateSaveRequest,
+        SaveRevisionRequest,
+        ArchivedSave,
+        ConsoleCommandRequest,
+        CommandResponse,
+        ForceStopRequest,
+        GameLogDocument,
         ApiError
     ))
 )]
@@ -76,6 +90,10 @@ pub fn router(app: App, static_path: &std::path::Path) -> Router {
         .route("/status", get(status))
         .route("/telemetry", get(telemetry))
         .route("/saves", get(saves))
+        .route("/saves/create", post(create_save))
+        .route("/saves/archived", get(archived_saves))
+        .route("/saves/{name}/archive", post(archive_save))
+        .route("/saves/archived/{id}/restore", post(restore_save))
         .route("/saves/{name}", get(download).post(upload))
         .route(
             "/saves/selection",
@@ -89,6 +107,9 @@ pub fn router(app: App, static_path: &std::path::Path) -> Router {
         )
         .route("/admins", get(get_admins).put(put_admins))
         .route("/logs", get(logs))
+        .route("/logs/file", get(game_log))
+        .route("/server/command", post(command))
+        .route("/server/force-stop", post(force_stop))
         .route("/server/start", post(start))
         .route("/server/stop", post(stop))
         .fallback(|| async {
@@ -171,7 +192,7 @@ async fn guard(request: Request<Body>, next: Next) -> Response {
                 .uri()
                 .path()
                 .strip_prefix("/api/saves/")
-                .is_some_and(|name| !name.contains('/'))
+                .is_some_and(|name| !name.contains('/') && name != "create")
                 || request.uri().path() == "/api/mods/upload");
         let binary_upload = request.method() == axum::http::Method::POST
             && request.uri().path() == "/api/mods/settings/file";
@@ -304,7 +325,9 @@ async fn start(
     State(app): State<App>,
     input: std::result::Result<Json<StartRequest>, JsonRejection>,
 ) -> Result<Json<Status>> {
-    Ok(Json(process::start(&app, &json(input)?.save).await?))
+    Ok(Json(
+        process::start_selected(&app, json(input)?.save.as_deref()).await?,
+    ))
 }
 #[utoipa::path(post, path="/api/server/stop", responses((status=200, body=Status), (status=409, body=ApiError)))]
 async fn stop(
@@ -473,4 +496,94 @@ mod upload_tests {
         assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
         Ok(())
     }
+}
+
+#[utoipa::path(post, path="/api/saves/create", request_body=CreateSaveRequest, responses((status=201, body=Save), (status=400, body=ApiError), (status=409, body=ApiError)))]
+async fn create_save(
+    State(app): State<App>,
+    input: std::result::Result<Json<CreateSaveRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Save>)> {
+    Ok((
+        StatusCode::CREATED,
+        Json(process::create_save(&app, &json(input)?.name).await?),
+    ))
+}
+#[utoipa::path(get, path="/api/saves/archived", responses((status=200, body=Vec<ArchivedSave>), (status=400, body=ApiError)))]
+async fn archived_saves(State(app): State<App>) -> Result<Json<Vec<ArchivedSave>>> {
+    let _inner = app.inner.lock().await;
+    Ok(Json(storage::archived_saves(&app.directory)?))
+}
+#[utoipa::path(post, path="/api/saves/{name}/archive", params(("name"=String, Path)), request_body=SaveRevisionRequest, responses((status=200, body=ArchivedSave), (status=400, body=ApiError), (status=409, body=ApiError)))]
+async fn archive_save(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    input: std::result::Result<Json<SaveRevisionRequest>, JsonRejection>,
+) -> Result<Json<ArchivedSave>> {
+    let request = json(input)?;
+    let _operation = app
+        .save_operations
+        .try_lock()
+        .map_err(|_| Error::conflict("A save operation is in progress"))?;
+    let inner = app.inner.lock().await;
+    if inner.child.is_some() {
+        return Err(Error::conflict("Stop the server before archiving saves"));
+    }
+    let selection = storage::save_selection(&app.save_selection_path())?;
+    if storage::selected_save(&selection, &app.saves_path())
+        .ok()
+        .as_deref()
+        == Some(&name)
+    {
+        return Err(Error::conflict(
+            "Select another save before archiving the active or selected save",
+        ));
+    }
+    Ok(Json(storage::archive_save(
+        &app.directory,
+        &name,
+        &request.revision,
+    )?))
+}
+#[utoipa::path(post, path="/api/saves/archived/{id}/restore", params(("id"=String, Path)), request_body=SaveRevisionRequest, responses((status=200, body=Save), (status=400, body=ApiError), (status=409, body=ApiError)))]
+async fn restore_save(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    input: std::result::Result<Json<SaveRevisionRequest>, JsonRejection>,
+) -> Result<Json<Save>> {
+    let request = json(input)?;
+    let _operation = app
+        .save_operations
+        .try_lock()
+        .map_err(|_| Error::conflict("A save operation is in progress"))?;
+    let inner = app.inner.lock().await;
+    if inner.child.is_some() {
+        return Err(Error::conflict("Stop the server before restoring saves"));
+    }
+    Ok(Json(storage::restore_save(
+        &app.directory,
+        &id,
+        &request.revision,
+    )?))
+}
+#[utoipa::path(post, path="/api/server/command", request_body=ConsoleCommandRequest, responses((status=200, body=CommandResponse), (status=400, body=ApiError), (status=409, body=ApiError)))]
+async fn command(
+    State(app): State<App>,
+    input: std::result::Result<Json<ConsoleCommandRequest>, JsonRejection>,
+) -> Result<Json<CommandResponse>> {
+    Ok(Json(process::send_command(&app, json(input)?).await?))
+}
+#[utoipa::path(post, path="/api/server/force-stop", request_body=ForceStopRequest, responses((status=200, body=Status), (status=400, body=ApiError), (status=409, body=ApiError)))]
+async fn force_stop(
+    State(app): State<App>,
+    input: std::result::Result<Json<ForceStopRequest>, JsonRejection>,
+) -> Result<Json<Status>> {
+    Ok(Json(process::force_stop(&app, json(input)?.confirm).await?))
+}
+#[utoipa::path(get, path="/api/logs/file", responses((status=200, body=GameLogDocument), (status=400, body=ApiError)))]
+async fn game_log(State(app): State<App>) -> Result<Json<GameLogDocument>> {
+    let _inner = app.inner.lock().await;
+    Ok(Json(storage::game_log(
+        &app.directory,
+        &app.settings_path(),
+    )?))
 }
