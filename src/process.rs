@@ -1,4 +1,4 @@
-use crate::{App, Error, Result, log, models::*, now, storage};
+use crate::{App, Error, Result, log, models::*, now, storage, telemetry};
 use std::{os::unix::process::ExitStatusExt, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -19,8 +19,12 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
         .as_ref()
         .ok_or_else(|| Error::bad("Configure FC_FACTORIO_BIN before starting a server"))?;
     let settings = storage::settings(&app.settings_path())?;
+    let auto_pause = settings.settings.auto_pause;
     storage::update_settings(&app.settings_path(), settings)?;
-    let redactions = std::sync::Arc::new(storage::log_redactions(&app.settings_path())?);
+    let session = telemetry::Session::new(auto_pause)?;
+    let mut redactions = storage::log_redactions(&app.settings_path())?;
+    redactions.push(session.redaction());
+    let redactions = std::sync::Arc::new(redactions);
     let admins = storage::admins(&app.admins_path())?;
     if admins.revision == "missing" {
         storage::update_admins(&app.admins_path(), admins)?;
@@ -40,11 +44,16 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
             format!("[path]\nread-data=__PATH__executable__/../../data\nwrite-data={data}\n");
         storage::atomic_write(&config, contents.as_bytes(), false)?;
     }
+    std::fs::create_dir_all(app.directory.join("mods"))?;
+    storage::ensure_directory(&app.directory.join("mods"))?;
     let mut command = Command::new(binary);
+    session.configure(&mut command);
     command
         .current_dir(&app.directory)
         .args(["--start-server"])
         .arg(save)
+        .arg("--mod-directory")
+        .arg(app.directory.join("mods"))
         .arg("--server-settings")
         .arg(app.settings_path())
         .arg("--server-adminlist")
@@ -59,6 +68,7 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
         Ok(child) => child,
         Err(error) => {
             inner.status.state = ServerState::Failed;
+            inner.status.since = now();
             inner.status.error = Some(format!("Unable to launch Factorio: {error}"));
             log(
                 &mut inner,
@@ -89,8 +99,11 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
         ));
     }
     inner.child = Some(child);
+    inner.telemetry.begin(session);
+    tokio::spawn(telemetry::run(app.clone(), generation));
     inner.stopping_at = None;
     inner.status.state = ServerState::Starting;
+    inner.status.since = now();
     inner.status.active_save = Some(name.into());
     inner.status.started_at = Some(now());
     inner.status.error = None;
@@ -115,6 +128,7 @@ pub async fn stop(app: &App) -> Result<Status> {
     )
     .map_err(|error| Error::from(std::io::Error::from_raw_os_error(error as i32)))?;
     inner.status.state = ServerState::Stopping;
+    inner.status.since = now();
     inner.stopping_at = Some(std::time::Instant::now());
     log(
         &mut inner,
@@ -173,6 +187,12 @@ pub async fn poll(app: &App) {
             if !clean && inner.status.error.is_none() {
                 inner.status.error = Some(format!("Factorio exited with {exit}"));
             }
+            inner.status.since = now();
+            inner.telemetry.end();
+            inner.telemetry.activity(
+                telemetry::ActivityKind::Stopped,
+                format!("Server {}", if clean { "stopped" } else { "failed" }),
+            );
             inner.status.started_at = None;
             inner.child = None;
             inner.stopping_at = None;
@@ -207,13 +227,45 @@ async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64, redac
     } else {
         level
     };
+    for secret in redactions {
+        message = message.replace(secret, "[redacted]");
+    }
     let mut inner = app.inner.lock().await;
+    if inner.generation != generation {
+        return;
+    }
+    let player_event = inner.telemetry.observe_log(&message);
+    if inner.telemetry.auto_pause_enabled()
+        && player_event
+        && matches!(
+            inner.status.state,
+            ServerState::Running | ServerState::Paused
+        )
+    {
+        let state = if inner.telemetry.auto_paused() {
+            ServerState::Paused
+        } else {
+            ServerState::Running
+        };
+        if inner.status.state != state {
+            inner.status.state = state;
+            inner.status.since = now();
+        }
+    }
     if inner.generation == generation
         && inner.status.state == ServerState::Starting
         && message.contains("ServerMultiplayerManager")
         && message.contains("to(InGame)")
     {
-        inner.status.state = ServerState::Running;
+        inner.status.state = if inner.telemetry.auto_paused() {
+            ServerState::Paused
+        } else {
+            ServerState::Running
+        };
+        inner.status.since = now();
+        inner
+            .telemetry
+            .activity(telemetry::ActivityKind::Started, "Server started".into());
     }
     if inner.generation == generation
         && let Some((_, rest)) = message.split_once("Factorio ")
@@ -222,9 +274,6 @@ async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64, redac
         && version.contains('.')
     {
         inner.status.version = Some(version.into());
-    }
-    for secret in redactions {
-        message = message.replace(secret, "[redacted]");
     }
     log(&mut inner, level, message);
 }
@@ -257,11 +306,13 @@ async fn pump(
             }
             Err(error) => {
                 let mut inner = app.inner.lock().await;
-                log(
-                    &mut inner,
-                    LogLevel::Error,
-                    format!("Unable to read Factorio output: {error}"),
-                );
+                if inner.generation == generation {
+                    log(
+                        &mut inner,
+                        LogLevel::Error,
+                        format!("Unable to read Factorio output: {error}"),
+                    );
+                }
                 break;
             }
         }
