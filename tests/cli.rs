@@ -6,6 +6,21 @@ use std::{
 };
 
 #[test]
+fn offline_health_check_fails_without_creating_data() -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let data = temporary.path().join("data");
+    let output = Command::new(env!("CARGO_BIN_EXE_factorio-control"))
+        .arg("--healthcheck")
+        .env("FC_BIND", "127.0.0.1:0")
+        .env("FC_DATA_DIR", &data)
+        .env_remove("FC_PUBLIC_URL")
+        .output()?;
+    assert!(!output.status.success());
+    assert!(!data.exists());
+    Ok(())
+}
+
+#[test]
 fn bootstrap_creates_a_fresh_data_directory_and_never_overwrites_accounts()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;

@@ -6,3 +6,5 @@
 .env
 
 *.tsbuildinfo
+
+/scripts/__pycache__/

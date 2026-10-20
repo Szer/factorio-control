@@ -16,21 +16,31 @@ FC_FACTORIO_BIN=/absolute/path/to/factorio/bin/x64/factorio cargo run --locked
 
 The executable is optional for exploring the UI; start stays disabled until it is configured. Upload a Factorio ZIP from Saves and select **Use on next start**, or enable **Always load latest** to resolve the newest save, including autosaves, on every start. Existing fixed selections remain fixed.
 
-## Docker on Linux
+## Docker and Dockge
+
+The public image `ghcr.io/szer/factorio-control` bundles Control and the Linux x86-64 Factorio headless server. It runs as UID/GID 10001 with a read-only root filesystem, dropped capabilities, and a persistent `/data` volume. Authentication is mandatory. The container health check verifies the manager independently of whether the game is running.
+
+Copy `compose.yaml` into a Dockge stack, set `FC_PUBLIC_URL` to the exact HTTPS origin of your reverse proxy, then deploy. For Docker Compose:
 
 ```sh
-docker compose up --build -d
+cp .env.example .env
+# Set your HTTPS origin in .env.
+docker compose up -d
 ```
 
-The image bundles the Linux x86-64 headless game and runs as UID/GID 10001. Compose uses host networking so the control panel stays on loopback; game traffic uses UDP 34197.
+The panel uses container TCP 8080 and host TCP 8181; the game uses UDP 34197. Host HTTP binds to loopback by default. Set `CONTROL_LISTEN_ADDRESS` to an address reachable by your reverse proxy if it runs elsewhere, and restrict that port to the proxy. Preserve the original Host header. RCON stays private and needs no published TCP port.
 
-To change Factorio version, set one line in `.env`, then rebuild:
+Read the initial administrator password with `docker compose exec control cat /data/bootstrap-admin.json`. Change it in the panel, create or upload a save, then start the game. Game startup is controlled through the panel. See [Dockge and FSM migration](docs/dockge.md) for existing installations.
+
+`CONTROL_IMAGE` accepts a release tag or `ghcr.io/szer/factorio-control@sha256:...`. CI publishes `latest`, `factorio-<game-version>` and `sha-<full-commit>` after checks pass; `v*` Git tags publish version tags. Pin a digest for deployments; `latest` and the game-version alias move as Control changes.
+
+To bump the bundled game, edit the single line in `.factorio-version` and push to `main`. CI builds, tests and publishes that version. To build locally:
 
 ```sh
-FACTORIO_VERSION=2.1.23
+docker compose -f compose.yaml -f compose.build.yaml up --build -d
 ```
 
-The persistent `factory-data` volume holds saves, mods, settings, panel accounts, and game runtime files. Configuration writes are atomic and revision-checked; uploads never overwrite an existing save. Game bind address and UDP port are configured under Manager settings and apply on the next start. Runtime paths shows the executable, configuration, and read/write data paths without exposing unrelated configuration values.
+The persistent `factory-data` volume holds saves, mods, settings, panel accounts and game runtime files. Back it up before changing versions. Configuration writes are atomic and revision-checked; save uploads never overwrite existing files. Container recreation preserves the volume; `docker compose down -v` removes it.
 
 ## Overview and telemetry
 
@@ -99,3 +109,7 @@ Keep `panel-accounts.json` and the data directory private. Back them up before m
 Scheduled backups and automatic dependency installation are not implemented. Mod dependency conflicts are reported before activation.
 
 Save uploads stream to temporary files with a 1 GiB limit. Mod ZIP uploads are capped at 64 MiB with a 256 MiB expanded-size limit. Archives are validated without extraction. Factorio determines save compatibility on launch.
+
+## License
+
+Factorio Control source is [MIT licensed](LICENSE). Factorio is proprietary software from Wube Software and remains subject to [its own terms](https://factorio.com/terms-of-service). Frontend dependency and font notices are included at `/third-party-notices.txt` in the image.

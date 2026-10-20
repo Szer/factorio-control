@@ -19,6 +19,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind: SocketAddr = std::env::var("FC_BIND")
         .unwrap_or_else(|_| "127.0.0.1:9400".into())
         .parse()?;
+    if std::env::args().any(|arg| arg == "--healthcheck") {
+        let address = SocketAddr::new(
+            if bind.ip().is_unspecified() {
+                if bind.is_ipv4() {
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                } else {
+                    std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+                }
+            } else {
+                bind.ip()
+            },
+            bind.port(),
+        );
+        let host = match std::env::var("FC_PUBLIC_URL") {
+            Ok(value) => {
+                let origin = url::Url::parse(&value)?;
+                origin[url::Position::BeforeHost..url::Position::AfterPort].to_owned()
+            }
+            Err(_) => address.to_string(),
+        };
+        let _: auth::SessionStatus = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .no_proxy()
+            .build()?
+            .get(format!("http://{address}/api/auth/status"))
+            .header(reqwest::header::HOST, host)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        return Ok(());
+    }
     let directory = PathBuf::from(std::env::var("FC_DATA_DIR").unwrap_or_else(|_| "./data".into()));
     let binary = std::env::var_os("FC_FACTORIO_BIN").map(PathBuf::from);
     let app = App::new(directory, binary).map_err(|e| e.message)?;

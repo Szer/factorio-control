@@ -1,18 +1,21 @@
 services:
   control:
-    build:
-      context: .
-      args:
-        FACTORIO_VERSION: ${FACTORIO_VERSION:-2.1.23}
-    image: factorio-control:local
-    network_mode: host
+    image: ${CONTROL_IMAGE:-ghcr.io/szer/factorio-control:latest}
+    init: true
     restart: unless-stopped
     stop_grace_period: 150s
+    ports:
+      - "${CONTROL_LISTEN_ADDRESS:-127.0.0.1}:${CONTROL_PORT:-8181}:8080"
+      - "${FACTORIO_PORT:-34197}:34197/udp"
+    environment:
+      FC_BIND: 0.0.0.0:8080
+      FC_PUBLIC_URL: ${FC_PUBLIC_URL:?Set FC_PUBLIC_URL to the HTTPS origin of your reverse proxy}
     read_only: true
     tmpfs:
       - /tmp
     cap_drop:
       - ALL
+    pids_limit: 512
     security_opt:
       - no-new-privileges:true
     volumes:

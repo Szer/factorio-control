@@ -1,0 +1,5 @@
+services:
+  control:
+    build:
+      context: .
+    image: factorio-control:local
