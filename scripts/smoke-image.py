@@ -20,6 +20,7 @@ engine = shlex.split(os.environ.get("CONTAINER_ENGINE", "docker"))
 image = sys.argv[1]
 name = "factorio-control-test-" + uuid.uuid4().hex[:12]
 volume = name + "-data"
+network = name + "-network"
 origin = "https://control.example.invalid"
 host = "control.example.invalid"
 port = None
@@ -35,16 +36,16 @@ def command(*arguments, check=True, timeout=30):
     return result
 
 
-def request(path, body=None, authenticated=True, request_origin=origin):
+def request(path, body=None, authenticated=True, request_origin=origin, method=None, client_ip="198.51.100.50"):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
-    headers = {"Host": host, "Origin": request_origin}
+    headers = {"Host": host, "Origin": request_origin, "X-Forwarded-For": client_ip}
     if cookie and authenticated:
         headers["Cookie"] = cookie
     if body is not None:
         headers["Content-Type"] = "application/json"
     try:
         connection.request(
-            "POST" if body is not None else "GET",
+            method or ("POST" if body is not None else "GET"),
             path,
             body=None if body is None else json.dumps(body),
             headers=headers,
@@ -89,12 +90,16 @@ def wait_state(states):
 
 try:
     command("volume", "create", volume)
+    command("network", "create", network)
+    metadata = json.loads(command("network", "inspect", network).stdout)[0]
+    gateway = metadata.get("IPAM", {}).get("Config", [{}])[0].get("Gateway") or metadata.get("subnets", [{}])[0].get("gateway")
+    require(gateway, "Isolated proxy fixture network has no gateway")
     mount = volume + ":/data" + (":U" if engine[-1] == "podman" else "")
     command(
-        "run", "-d", "--name", name, "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
+        "run", "-d", "--name", name, "--network", network, "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
         "-p", "127.0.0.1::8080", "-p", "127.0.0.1::34197/udp",
-        "-e", "FC_PUBLIC_URL=" + origin, "--volume", mount, image,
+        "-e", "FC_PUBLIC_URL=" + origin, "-e", "FC_TRUSTED_PROXIES=" + gateway, "--volume", mount, image,
     )
     port = int(command("port", name, "8080/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
     wait_ready()
@@ -116,12 +121,24 @@ try:
     status, headers, account = request("/api/auth/login", {"username": "admin", "password": password}, authenticated=False)
     require(status == 200 and not account["user"]["must_change_password"], "Changed account could not sign in")
     cookie = headers.get("set-cookie", headers.get("Set-Cookie", "")).split(";", 1)[0]
+    for attempt in range(6):
+        require(request("/api/auth/login", {"username": "admin", "password": "incorrect-fixture"}, authenticated=False, client_ip="198.51.100.99")[0] == (429 if attempt == 5 else 401), "Proxy client throttling is not isolated")
+    require(request("/api/auth/login", {"username": "admin", "password": password}, authenticated=False)[0] == 200, "An attack from another proxy client blocked valid login")
     require(request("/api/server/stop", {}, request_origin="https://attacker.invalid")[0] == 403, "Cross-origin mutation was allowed")
     status, _, value = request("/api/status")
     require(status == 200 and value["version"] == Path(".factorio-version").read_text().strip(), "Bundled Factorio version differs from configured version")
     require(request("/api/saves/create", {"name": "smoke-world.zip"})[0] == 201, "World creation failed")
+    command("exec", name, "sh", "-c", "printf '[\"fixture-player\"]\\n' > /data/server-whitelist.json")
+    require(request("/api/server/start", {"save": "smoke-world.zip"})[0] == 409, "Migrated whitelist silently defaulted to disabled")
+    status, _, manager = request("/api/manager-settings")
+    require(status == 200, "Manager settings unavailable")
+    manager["settings"]["use_server_whitelist"] = True
+    require(request("/api/manager-settings", manager, method="PUT")[0] == 200, "Whitelist could not be enabled")
     require(request("/api/server/start", {"save": "smoke-world.zip"})[0] == 200, "Game start failed")
     wait_state({"running", "paused"})
+    require(request("/api/server/command", {"command": "Factorio 1.1", "acknowledge_scripting": False})[0] == 200, "Version-spoof chat fixture failed")
+    time.sleep(0.2)
+    require(request("/api/status")[2]["version"] == Path(".factorio-version").read_text().strip(), "Chat changed the trusted engine version")
     require(request("/api/server/command", {"command": "/players", "acknowledge_scripting": False})[0] == 200, "Game console command failed")
     require(request("/api/server/stop", {})[0] == 200, "Graceful stop failed")
     wait_state({"stopped"})
@@ -137,3 +154,4 @@ try:
 finally:
     command("rm", "--force", name, check=False)
     command("volume", "rm", volume, check=False)
+    command("network", "rm", network, check=False)
