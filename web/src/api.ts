@@ -189,6 +189,23 @@ export const modUpdatesSchema = z.object({
   message: z.string().nullable(),
 }) satisfies z.ZodType<components["schemas"]["ModUpdates"]>;
 
+export const saveSyncPlanSchema = z.object({
+  revision: z.string(),
+  save: z.string(),
+  factorio_version: z.string(),
+  engine_version: z.string(),
+  mods: z.array(
+    z.object({
+      name: z.string(),
+      version: z.string(),
+      action: z.enum(["keep", "enable", "switch", "download", "bundled"]),
+    }),
+  ),
+  disable: z.array(z.string()),
+  blockers: z.array(z.string()),
+}) satisfies z.ZodType<components["schemas"]["SyncPlan"]>;
+export type SaveSyncPlan = z.infer<typeof saveSyncPlanSchema>;
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -256,6 +273,14 @@ export const api = {
       headers: { "Content-Type": "application/zip" },
       body: file,
     }),
+  saveModPlan: (name: string) =>
+    request(`/api/saves/${encodeURIComponent(name)}/mods`, saveSyncPlanSchema),
+  syncSaveMods: ({ name, revision }: { name: string; revision: string }) =>
+    request(
+      `/api/saves/${encodeURIComponent(name)}/mods/sync`,
+      modsSchema,
+      json("POST", { revision }),
+    ),
   mods: () => request("/api/mods", modsSchema),
   uploadMod: ({ file, revision }: { file: File; revision: string }) =>
     request("/api/mods/upload", modsSchema, {

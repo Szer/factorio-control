@@ -857,6 +857,126 @@
                 }
               }
             }
+          },
+          "413": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saves/{name}/mods": {
+      "get": {
+        "tags": [
+          "crate::mods::save_sync"
+        ],
+        "operationId": "plan",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncPlan"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saves/{name}/mods/sync": {
+      "post": {
+        "tags": [
+          "crate::mods::save_sync"
+        ],
+        "operationId": "apply",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -1979,6 +2099,91 @@
             ]
           }
         }
+      },
+      "SyncAction": {
+        "type": "string",
+        "enum": [
+          "keep",
+          "enable",
+          "switch",
+          "download",
+          "bundled"
+        ]
+      },
+      "SyncMod": {
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/SyncAction"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "SyncPlan": {
+        "type": "object",
+        "required": [
+          "revision",
+          "save",
+          "factorio_version",
+          "engine_version",
+          "mods",
+          "disable",
+          "blockers"
+        ],
+        "properties": {
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "disable": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "engine_version": {
+            "type": "string"
+          },
+          "factorio_version": {
+            "type": "string"
+          },
+          "mods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SyncMod"
+            }
+          },
+          "revision": {
+            "type": "string"
+          },
+          "save": {
+            "type": "string"
+          }
+        }
+      },
+      "SyncRequest": {
+        "type": "object",
+        "required": [
+          "revision"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "UpsPoint": {
         "type": "object",

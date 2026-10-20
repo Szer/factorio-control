@@ -1,3 +1,5 @@
+#[path = "save_sync.rs"]
+pub mod save_sync;
 use crate::{
     App, Error, Result,
     mod_settings::{self, ModSettingsDocument, ModSettingsPatch},
@@ -305,7 +307,7 @@ fn bundled_mods(app: &App) -> Result<BTreeMap<String, String>> {
     #[derive(Deserialize)]
     struct Builtin {
         name: String,
-        version: String,
+        version: Option<String>,
     }
     for entry in fs::read_dir(data)? {
         let entry = entry?;
@@ -323,8 +325,11 @@ fn bundled_mods(app: &App) -> Result<BTreeMap<String, String>> {
         if !valid_name(&info.name) {
             return Err(Error::bad("Invalid bundled mod name"));
         }
-        version(&info.version)?;
-        bundled.insert(info.name, info.version);
+        let value = info
+            .version
+            .ok_or_else(|| Error::bad("Bundled mod is missing its version"))?;
+        version(&value)?;
+        bundled.insert(info.name, value);
     }
     Ok(bundled)
 }
@@ -658,13 +663,13 @@ pub fn install(
     check_compatibility(&info, engine)?;
     let document = current(app, revision)?;
     let previous = document.mods.iter().find(|entry| entry.name == info.name);
-    if let Some(previous) = previous
-        && version(&info.version)? <= version(&previous.version)?
-    {
-        return Err(Error::conflict(
-            "Upload a newer mod version; installed versions cannot be overwritten or downgraded",
-        ));
+    if previous.is_some_and(|previous| previous.version == info.version) {
+        return Err(Error::conflict("That mod version is already installed"));
     }
+    let activate = match previous {
+        Some(previous) => version(&info.version)? > version(&previous.version)?,
+        None => true,
+    };
     let path = directory(app)?;
     let file_name = format!("{}_{}.zip", info.name, info.version);
     let target = path.join(&file_name);
@@ -676,26 +681,36 @@ pub fn install(
     if previous.is_none() && mod_list.mods.len() >= MAX_MODS {
         return Err(Error::bad("Too many installed mods"));
     }
-    set_entry(
-        &mut mod_list,
-        &info.name,
-        previous.is_none_or(|entry| entry.enabled),
-        &info.version,
-    );
     let mut candidates = document.mods.clone();
-    candidates.retain(|item| item.name != info.name);
-    candidates.push(InstalledMod {
-        name: info.name.clone(),
-        version: info.version.clone(),
-        title: info.title.clone(),
-        author: info.author.clone(),
-        description: info.description.clone(),
-        factorio_version: info.factorio_version.clone(),
-        dependencies: info.dependencies.clone(),
-        enabled: previous.is_none_or(|item| item.enabled),
-        file_name: file_name.clone(),
-        size_bytes: bytes.len() as u64,
-    });
+    if activate {
+        set_entry(
+            &mut mod_list,
+            &info.name,
+            previous.is_none_or(|entry| entry.enabled),
+            &info.version,
+        );
+        candidates.retain(|item| item.name != info.name);
+        candidates.push(InstalledMod {
+            name: info.name.clone(),
+            version: info.version.clone(),
+            title: info.title.clone(),
+            author: info.author.clone(),
+            description: info.description.clone(),
+            factorio_version: info.factorio_version.clone(),
+            dependencies: info.dependencies.clone(),
+            enabled: previous.is_none_or(|item| item.enabled),
+            file_name: file_name.clone(),
+            size_bytes: bytes.len() as u64,
+        });
+    } else if let Some(previous) = previous {
+        // An older ZIP is available for save sync without changing the active version.
+        set_entry(
+            &mut mod_list,
+            &previous.name,
+            previous.enabled,
+            &previous.version,
+        );
+    }
     check_dependencies(&candidates, &mod_list, engine, &bundled_mods(app)?)?;
     let list_bytes = serde_json::to_vec_pretty(&mod_list)?;
     storage::atomic_write(&target, bytes, false)?;
@@ -729,6 +744,8 @@ fn expected(headers: &HeaderMap) -> Result<&str> {
 }
 pub fn routes() -> Router<App> {
     Router::new()
+        .route("/saves/{name}/mods", get(save_sync::plan))
+        .route("/saves/{name}/mods/sync", post(save_sync::apply))
         .route("/mods", get(get_mods))
         .route(
             "/mods/upload",

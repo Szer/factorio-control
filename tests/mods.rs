@@ -602,6 +602,8 @@ fn detects_installed_bundled_dependencies_and_honors_explicit_disabling() -> Tes
     let binary = game.join("bin/x64/factorio");
     fs::create_dir_all(binary.parent().ok_or("no binary parent")?)?;
     fs::write(&binary, b"synthetic binary")?;
+    fs::create_dir_all(game.join("data/core"))?;
+    fs::write(game.join("data/core/info.json"), br#"{"name":"core"}"#)?;
     for name in ["base", "quality", "space-age", "elevated-rails", "recycler"] {
         let path = game.join("data").join(name);
         fs::create_dir_all(&path)?;
@@ -673,5 +675,33 @@ async fn unknown_binary_version_cannot_bypass_http_mod_compatibility_checks() ->
         mods::list(&app).map_err(app_error)?.revision,
         installed.revision
     );
+    Ok(())
+}
+
+#[test]
+fn older_upload_is_stored_for_sync_without_changing_active_version() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let app = App::new(dir.path().into(), None).map_err(app_error)?;
+    let empty = mods::list(&app).map_err(app_error)?;
+    let current = mods::install(
+        &app,
+        &empty.revision,
+        &archive("2.0.0", &["base"], None)?,
+        Some("2.1.23"),
+    )
+    .map_err(app_error)?;
+    let stored = mods::install(
+        &app,
+        &current.revision,
+        &archive("1.0.0", &["base"], None)?,
+        Some("2.1.23"),
+    )
+    .map_err(app_error)?;
+    assert!(dir.path().join("mods/demo_1.0.0.zip").exists());
+    assert_eq!(
+        stored.mods.first().map(|item| item.version.as_str()),
+        Some("2.0.0")
+    );
+    assert_ne!(stored.revision, current.revision);
     Ok(())
 }

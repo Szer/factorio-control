@@ -6,6 +6,7 @@ pub mod mod_settings;
 pub mod models;
 pub mod mods;
 pub mod process;
+pub mod save_metadata;
 pub mod storage;
 pub mod telemetry;
 

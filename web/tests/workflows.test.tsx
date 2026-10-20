@@ -15,6 +15,7 @@ import SettingsPage from "../src/pages/Settings";
 import Administrators from "../src/components/Administrators";
 import ServerControls from "../src/components/ServerControls";
 import App from "../src/App";
+import Saves from "../src/pages/Saves";
 
 const settings: SettingsDocument = {
   revision: "one",
@@ -455,4 +456,70 @@ it("edits manager JSON separately, validates unknown keys, and preserves form ch
       expect.anything(),
     );
   });
+});
+
+it("accepts a 200 MiB save and previews mod sync before applying it", async () => {
+  const file = new File(["zip"], "large.zip", { type: "application/zip" });
+  Object.defineProperty(file, "size", { value: 200 * 1024 * 1024 });
+  const save = { name: "large.zip", size_bytes: file.size, modified_at: 1 };
+  vi.spyOn(api, "saves").mockResolvedValue([save]);
+  vi.spyOn(api, "selection").mockResolvedValue({ revision: "one", save: null });
+  const upload = vi.spyOn(api, "upload").mockResolvedValue(save);
+  vi.spyOn(api, "saveModPlan").mockResolvedValue({
+    revision: "plan-one",
+    save: "large.zip",
+    factorio_version: "2.1.23",
+    engine_version: "2.1.23",
+    mods: [{ name: "demo", version: "1.0.0", action: "download" }],
+    disable: ["extra"],
+    blockers: [],
+  });
+  const sync = vi.spyOn(api, "syncSaveMods").mockResolvedValue({
+    revision: "two",
+    mods: [],
+    portal_authenticated: true,
+  });
+  mount(<Saves status={stopped} />);
+  const user = userEvent.setup();
+  await user.upload(screen.getByLabelText("Upload Factorio save"), file);
+  await waitFor(() => {
+    expect(upload).toHaveBeenCalledWith(file, expect.anything());
+  });
+  await user.click(await screen.findByRole("button", { name: "Sync mods" }));
+  await screen.findByRole("heading", { name: "Sync mods with large.zip" });
+  expect(screen.getByText("Download exact version")).toBeDefined();
+  expect(screen.getByText(/extra/)).toBeDefined();
+  expect(sync).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Apply mod sync" }));
+  await waitFor(() => {
+    expect(sync).toHaveBeenCalledWith(
+      { name: "large.zip", revision: "plan-one" },
+      expect.anything(),
+    );
+  });
+});
+
+it("does not allow applying a sync plan with missing credentials", async () => {
+  vi.spyOn(api, "saves").mockResolvedValue([
+    { name: "world.zip", size_bytes: 1, modified_at: 1 },
+  ]);
+  vi.spyOn(api, "selection").mockResolvedValue({ revision: "one", save: null });
+  vi.spyOn(api, "saveModPlan").mockResolvedValue({
+    revision: "plan-one",
+    save: "world.zip",
+    factorio_version: "2.1.23",
+    engine_version: "2.1.23",
+    mods: [],
+    disable: [],
+    blockers: ["Configure Factorio username/token"],
+  });
+  mount(<Saves status={stopped} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Sync mods" }));
+  await screen.findByText("Configure Factorio username/token");
+  expect(
+    screen
+      .getByRole("button", { name: "Apply mod sync" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
 });

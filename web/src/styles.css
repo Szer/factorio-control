@@ -15,6 +15,7 @@
   --heading: "DM Sans Variable", system-ui, sans-serif;
   font-size: 16px;
   line-height: 1.45;
+  overflow-x: clip;
 }
 * {
   box-sizing: border-box;
@@ -1993,4 +1994,11 @@ summary {
   margin-top: 6px;
   font-size: 14px;
   color: #bbb;
+}
+
+.sync-panel {
+  margin-bottom: 16px;
+}
+.sync-panel .row-actions {
+  flex-wrap: wrap;
 }

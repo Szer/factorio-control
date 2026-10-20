@@ -513,7 +513,8 @@ export default function Mods({ status }: { status: Status }) {
       <div hidden={tab !== "mods"}>
         <div className="toolbar">
           <p className="muted">
-            Upload a mod ZIP to install it or replace it with a newer version.
+            Upload a mod ZIP to install or update it. Older versions are kept
+            for save sync without changing the active version.
           </p>
           <input
             ref={input}

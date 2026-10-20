@@ -34,6 +34,8 @@ use utoipa::OpenApi;
         stop,
         upload,
         download,
+        crate::mods::save_sync::plan,
+        crate::mods::save_sync::apply,
         crate::mods::get_mods,
         crate::mods::upload_mod,
         crate::mods::download_mod,
@@ -164,7 +166,11 @@ async fn guard(request: Request<Body>, next: Next) -> Response {
             .and_then(|h| h.to_str().ok())
             .and_then(|h| h.split(';').next());
         let zip_upload = request.method() == axum::http::Method::POST
-            && (request.uri().path().starts_with("/api/saves/")
+            && (request
+                .uri()
+                .path()
+                .strip_prefix("/api/saves/")
+                .is_some_and(|name| !name.contains('/'))
                 || request.uri().path() == "/api/mods/upload");
         let binary_upload = request.method() == axum::http::Method::POST
             && request.uri().path() == "/api/mods/settings/file";

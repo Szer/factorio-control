@@ -6,13 +6,15 @@ import {
   FileArchive,
   LoaderCircle,
   Search,
+  RefreshCw,
   Upload,
 } from "lucide-react";
 import { api, errorMessage, formatBytes, formatDate } from "../api";
-import type { Status } from "../api";
+import type { Status, SaveSyncPlan } from "../api";
 import { EmptyState, Loading, Notice } from "../components/ui";
 
 export default function Saves({ status }: { status: Status }) {
+  const [syncPlan, setSyncPlan] = useState<SaveSyncPlan | null>(null);
   const [search, setSearch] = useState("");
   const [fileError, setFileError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -34,6 +36,21 @@ export default function Saves({ status }: { status: Status }) {
       await client.invalidateQueries({ queryKey: ["saves"] });
     },
   });
+  const sync = useMutation({
+    mutationFn: api.syncSaveMods,
+    onSuccess: (result) => {
+      client.setQueryData(["mods"], result);
+      setSyncPlan(null);
+    },
+  });
+  const review = useMutation({
+    mutationFn: api.saveModPlan,
+    onSuccess: (result) => {
+      setSyncPlan(result);
+      sync.reset();
+    },
+  });
+  const stopped = status.state === "stopped" || status.state === "failed";
   const filtered =
     saves.data?.filter((save) =>
       save.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
@@ -46,8 +63,8 @@ export default function Saves({ status }: { status: Status }) {
       setFileError("Choose a Factorio save in ZIP format.");
       return;
     }
-    if (file.size > 64 * 1024 * 1024) {
-      setFileError("This save is larger than the 64 MB upload limit.");
+    if (file.size > 1024 * 1024 * 1024) {
+      setFileError("This save is larger than the 1 GiB upload limit.");
       return;
     }
     upload.mutate(file);
@@ -130,6 +147,122 @@ export default function Saves({ status }: { status: Status }) {
       {upload.isSuccess && (
         <Notice success>{upload.data.name} is ready to load.</Notice>
       )}
+      {review.isPending && <Notice>Reading the save's mod list…</Notice>}
+      {review.isError && <Notice>{errorMessage(review.error)}</Notice>}
+      {sync.isSuccess && (
+        <Notice success>
+          Mods synced. Select this save for the next server start when you are
+          ready.
+        </Notice>
+      )}
+      {syncPlan && (
+        <section className="panel sync-panel" aria-label="Sync save mods">
+          <div className="section-heading">
+            <div>
+              <h2>Sync mods with {syncPlan.save}</h2>
+              <p>
+                Saved with Factorio {syncPlan.factorio_version} · Installed{" "}
+                {syncPlan.engine_version}
+              </p>
+            </div>
+          </div>
+          <div className="form-fields">
+            <p>
+              Match the save's exact mod versions. Missing versions are
+              downloaded from the Factorio mod portal; other mods are disabled.
+              Existing ZIPs and the save are kept.
+            </p>
+            <p className="muted">
+              Bundled mods use the installed game version. Startup settings are
+              unchanged; import mod-settings.dat on the Mods page if needed.
+            </p>
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Mod</th>
+                    <th>Version in save</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {syncPlan.mods.map((item) => (
+                    <tr key={item.name}>
+                      <td>{item.name}</td>
+                      <td>{item.version}</td>
+                      <td>
+                        {
+                          {
+                            keep: "Already matched",
+                            enable: "Enable",
+                            switch: "Switch installed version",
+                            download: "Download exact version",
+                            bundled: "Use bundled mod",
+                          }[item.action]
+                        }
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {syncPlan.disable.length > 0 && (
+              <p>
+                <strong>Will disable:</strong> {syncPlan.disable.join(", ")}
+              </p>
+            )}
+            {syncPlan.blockers.map((message) => (
+              <Notice key={message}>{message}</Notice>
+            ))}
+            {!stopped && <Notice>Stop the server before syncing mods.</Notice>}
+            {sync.isError && (
+              <Notice>
+                {errorMessage(sync.error)} Review the plan again before
+                retrying.
+              </Notice>
+            )}
+            <div className="row-actions">
+              <button
+                className="button secondary"
+                disabled={sync.isPending || review.isPending}
+                onClick={() => {
+                  setSyncPlan(null);
+                  sync.reset();
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="button secondary"
+                disabled={sync.isPending || review.isPending}
+                onClick={() => {
+                  review.mutate(syncPlan.save);
+                }}
+              >
+                Refresh plan
+              </button>
+              <button
+                className="button primary"
+                disabled={
+                  !stopped ||
+                  sync.isPending ||
+                  review.isPending ||
+                  sync.isError ||
+                  syncPlan.blockers.length > 0
+                }
+                onClick={() => {
+                  sync.mutate({
+                    name: syncPlan.save,
+                    revision: syncPlan.revision,
+                  });
+                }}
+              >
+                {sync.isPending ? "Syncing mods…" : "Apply mod sync"}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
       {saves.isPending ? (
         <Loading />
       ) : saves.isError ? (
@@ -141,8 +274,8 @@ export default function Saves({ status }: { status: Status }) {
             title="No saves uploaded"
             action={uploadButton}
           >
-            Upload a Factorio save to continue your factory. ZIP files up to 64
-            MB; existing saves are kept intact.
+            Upload a Factorio save to continue your factory. ZIP files up to 1
+            GiB; existing saves are kept intact.
           </EmptyState>
         </section>
       ) : (
@@ -210,6 +343,17 @@ export default function Saves({ status }: { status: Status }) {
                           {selection.data?.save === save.name
                             ? "Selected"
                             : "Use on next start"}
+                        </button>
+                        <button
+                          className="button secondary"
+                          disabled={review.isPending || sync.isPending}
+                          onClick={() => {
+                            setSyncPlan(null);
+                            review.mutate(save.name);
+                          }}
+                        >
+                          <RefreshCw size={16} />
+                          Sync mods
                         </button>
                         <a
                           className="icon-button"

@@ -1,0 +1,571 @@
+use super::*;
+use crate::save_metadata;
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncAction {
+    Keep,
+    Enable,
+    Switch,
+    Download,
+    Bundled,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct SyncMod {
+    pub name: String,
+    pub version: String,
+    pub action: SyncAction,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct SyncPlan {
+    pub revision: String,
+    pub save: String,
+    pub factorio_version: String,
+    pub engine_version: String,
+    pub mods: Vec<SyncMod>,
+    pub disable: Vec<String>,
+    pub blockers: Vec<String>,
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SyncRequest {
+    pub revision: String,
+}
+
+fn inventory(app: &App) -> Result<Vec<InstalledMod>> {
+    let mut result = Vec::new();
+    for item in fs::read_dir(directory(app)?)? {
+        let item = item?;
+        let file_name = item.file_name().to_string_lossy().into_owned();
+        if !file_name.ends_with(".zip") {
+            continue;
+        }
+        storage::ensure_regular(&item.path())?;
+        let size_bytes = item.metadata()?.len();
+        if size_bytes > MAX_ARCHIVE as u64 || result.len() >= MAX_MODS * 10 {
+            return Err(Error::bad("Installed mod archives exceed supported limits"));
+        }
+        let mut archive =
+            zip::ZipArchive::new(fs::File::open(item.path())?).map_err(|_| zip_error())?;
+        let info = read_info(&mut archive)?;
+        result.push(InstalledMod {
+            name: info.name,
+            version: info.version,
+            title: info.title,
+            author: info.author,
+            description: info.description,
+            factorio_version: info.factorio_version,
+            dependencies: info.dependencies,
+            enabled: true,
+            file_name,
+            size_bytes,
+        });
+    }
+    Ok(result)
+}
+
+fn build_plan(
+    app: &App,
+    name: &str,
+    engine: &str,
+) -> Result<(SyncPlan, Vec<InstalledMod>, ModList)> {
+    let save_path = storage::save_path(&app.saves_path(), name)?;
+    let metadata = save_metadata::read(&save_path)?;
+    let save_stat = fs::metadata(save_path)?;
+    let current = list(app)?;
+    let archives = inventory(app)?;
+    let (mod_list, _) = read_list(&directory(app)?)?;
+    let bundled = bundled_mods(app)?;
+    let mut hash = Sha256::new();
+    hash.update(current.revision.as_bytes());
+    hash.update(serde_json::to_vec(&metadata)?);
+    hash.update(engine.as_bytes());
+    hash.update(name.as_bytes());
+    hash.update(save_stat.len().to_le_bytes());
+    hash.update(
+        save_stat
+            .modified()?
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error::bad("Invalid save timestamp"))?
+            .as_nanos()
+            .to_le_bytes(),
+    );
+    let mut blockers = Vec::new();
+    if family(&metadata.factorio_version) != family(engine) {
+        blockers.push(format!("Save uses Factorio {}; configured game is {engine}. Use the matching game series before syncing.", metadata.factorio_version));
+    }
+    if version(&metadata.factorio_version)? > version(engine)? {
+        blockers.push("This save was made with a newer Factorio version. Update the configured game before syncing.".into());
+    }
+    if metadata.mods.len() > MAX_MODS || !metadata.mods.iter().any(|item| item.name == "base") {
+        return Err(Error::bad("Save has an invalid mod list"));
+    }
+    let mut wanted = HashSet::new();
+    let mut mods = Vec::new();
+    for item in &metadata.mods {
+        if !valid_name(&item.name) || !wanted.insert(item.name.clone()) {
+            return Err(Error::bad("Save contains invalid or duplicate mod names"));
+        }
+        version(&item.version)?;
+        let action = if protected(&item.name) || bundled.contains_key(&item.name) {
+            if !bundled.contains_key(&item.name) && item.name != "base" {
+                blockers.push(format!(
+                    "Bundled mod {} is missing from the configured game installation.",
+                    item.name
+                ));
+            }
+            SyncAction::Bundled
+        } else if archives
+            .iter()
+            .any(|local| local.name == item.name && local.version == item.version)
+        {
+            match current.mods.iter().find(|local| local.name == item.name) {
+                Some(local) if local.version == item.version && local.enabled => SyncAction::Keep,
+                Some(local) if local.version == item.version => SyncAction::Enable,
+                _ => SyncAction::Switch,
+            }
+        } else {
+            if !current.portal_authenticated {
+                blockers.push(format!("{} {} needs a download. Configure Factorio username/token, or upload that ZIP first.", item.name, item.version));
+            }
+            SyncAction::Download
+        };
+        mods.push(SyncMod {
+            name: item.name.clone(),
+            version: item.version.clone(),
+            action,
+        });
+    }
+    let mut disable = HashSet::new();
+    for item in current.mods.iter().filter(|item| item.enabled) {
+        if !wanted.contains(&item.name) {
+            disable.insert(item.name.clone());
+        }
+    }
+    for entry in &mod_list.mods {
+        if entry.enabled && !wanted.contains(&entry.name) {
+            disable.insert(entry.name.clone());
+        }
+    }
+    for name in bundled.keys() {
+        if !wanted.contains(name)
+            && mod_list
+                .mods
+                .iter()
+                .find(|entry| &entry.name == name)
+                .is_none_or(|entry| entry.enabled)
+        {
+            disable.insert(name.clone());
+        }
+    }
+    let mut disable: Vec<String> = disable.into_iter().collect();
+    disable.sort();
+    Ok((
+        SyncPlan {
+            revision: format!("{:x}", hash.finalize()),
+            save: name.into(),
+            factorio_version: metadata.factorio_version,
+            engine_version: engine.into(),
+            mods,
+            disable,
+            blockers,
+        },
+        archives,
+        mod_list,
+    ))
+}
+
+#[utoipa::path(get, path="/api/saves/{name}/mods", params(("name"=String, Path)), responses((status=200, body=SyncPlan), (status=400, body=ApiError), (status=409, body=ApiError)))]
+pub async fn plan(State(app): State<App>, Path(name): Path<String>) -> Result<Json<SyncPlan>> {
+    let inner = app.inner.lock().await;
+    let (plan, _, _) = build_plan(&app, &name, known_engine(&inner)?)?;
+    Ok(Json(plan))
+}
+
+async fn download_exact(
+    app: &App,
+    item: &SyncMod,
+    engine: &str,
+    client: &reqwest::Client,
+) -> Result<Vec<u8>> {
+    let (username, token) = credentials(app)?
+        .ok_or_else(|| Error::bad("Configure Factorio username/token to download missing mods"))?;
+    let releases = releases(client, &item.name).await?;
+    let release = releases.iter().find(|release| release.version == item.version && family(&release.info_json.factorio_version) == family(engine))
+        .ok_or_else(|| Error::bad(&format!("{} {} is not available for this game version on the mod portal. Upload that exact ZIP to sync this save.", item.name, item.version)))?;
+    let mut url = url::Url::parse("https://mods.factorio.com")
+        .map_err(|_| Error::bad("Invalid mod portal URL"))?;
+    if !release.download_url.starts_with("/download/")
+        || release.download_url.contains(['?', '#', '\\'])
+        || release.download_url.contains("..")
+    {
+        return Err(Error::bad("Invalid mod portal download path"));
+    }
+    url.set_path(&release.download_url);
+    url.query_pairs_mut()
+        .append_pair("username", &username)
+        .append_pair("token", &token);
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| Error::bad("Could not download the required mod from Factorio"))?;
+    let bytes = response_bytes(response, MAX_ARCHIVE).await?;
+    if release.sha1.to_ascii_lowercase() != format!("{:x}", sha1::Sha1::digest(&bytes)) {
+        return Err(Error::bad(
+            "Downloaded mod checksum does not match the portal",
+        ));
+    }
+    let info = validate_archive(&bytes)?;
+    if info.name != item.name || info.version != item.version {
+        return Err(Error::bad(
+            "Downloaded mod does not match the save's required version",
+        ));
+    }
+    check_compatibility(&info, Some(engine))?;
+    Ok(bytes)
+}
+
+fn candidate_list(plan: &SyncPlan, old: &ModList, inventory: &[InstalledMod]) -> ModList {
+    let mut desired = old.clone();
+    for entry in &mut desired.mods {
+        entry.enabled = false;
+    }
+    for local in inventory {
+        if !desired.mods.iter().any(|entry| entry.name == local.name) {
+            set_entry(&mut desired, &local.name, false, &local.version);
+        }
+    }
+    for name in &plan.disable {
+        if !desired.mods.iter().any(|entry| &entry.name == name) {
+            desired.mods.push(ModListEntry {
+                name: name.clone(),
+                enabled: false,
+                version: None,
+                other: BTreeMap::new(),
+            });
+        }
+    }
+    for item in &plan.mods {
+        set_entry(&mut desired, &item.name, true, &item.version);
+        if matches!(item.action, SyncAction::Bundled) {
+            for entry in &mut desired.mods {
+                if entry.name == item.name {
+                    entry.version = None;
+                }
+            }
+        }
+    }
+    desired
+}
+
+#[utoipa::path(post, path="/api/saves/{name}/mods/sync", params(("name"=String, Path)), request_body=SyncRequest, responses((status=200, body=ModsDocument), (status=400, body=ApiError), (status=409, body=ApiError)))]
+pub async fn apply(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    input: std::result::Result<Json<SyncRequest>, JsonRejection>,
+) -> Result<Json<ModsDocument>> {
+    let input = json(input)?;
+    let plan = {
+        let inner = app.inner.lock().await;
+        stopped(&inner)?;
+        let (plan, _, _) = build_plan(&app, &name, known_engine(&inner)?)?;
+        if plan.revision != input.revision {
+            return Err(Error::conflict(
+                "Save or mods changed. Review the sync plan again",
+            ));
+        }
+        if !plan.blockers.is_empty() {
+            return Err(Error::bad(&plan.blockers.join(" ")));
+        }
+        plan
+    };
+    let directory = directory(&app)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".sync-")
+        .tempdir_in(&directory)?;
+    let client = client()?;
+    for item in &plan.mods {
+        if matches!(item.action, SyncAction::Download) {
+            let bytes = download_exact(&app, item, &plan.engine_version, &client).await?;
+            storage::atomic_write(
+                &staging
+                    .path()
+                    .join(format!("{}_{}.zip", item.name, item.version)),
+                &bytes,
+                false,
+            )?;
+        }
+    }
+    let inner = app.inner.lock().await;
+    stopped(&inner)?;
+    let (fresh, mut archives, old) = build_plan(&app, &name, known_engine(&inner)?)?;
+    if fresh.revision != plan.revision {
+        return Err(Error::conflict(
+            "Save or mods changed during download. Review the sync plan again",
+        ));
+    }
+    let mut candidates = Vec::new();
+    for item in &plan.mods {
+        if matches!(item.action, SyncAction::Bundled) {
+            continue;
+        }
+        if let Some(local) = archives
+            .iter()
+            .find(|local| local.name == item.name && local.version == item.version)
+        {
+            validate_archive(&fs::read(directory.join(&local.file_name))?)?;
+            let mut local = local.clone();
+            local.enabled = true;
+            candidates.push(local);
+        } else {
+            let file_name = format!("{}_{}.zip", item.name, item.version);
+            let bytes = fs::read(staging.path().join(&file_name))?;
+            let info = validate_archive(&bytes)?;
+            let local = InstalledMod {
+                name: info.name,
+                version: info.version,
+                title: info.title,
+                author: info.author,
+                description: info.description,
+                factorio_version: info.factorio_version,
+                dependencies: info.dependencies,
+                enabled: true,
+                file_name,
+                size_bytes: bytes.len() as u64,
+            };
+            archives.push(local.clone());
+            candidates.push(local);
+        }
+    }
+    let desired = candidate_list(&plan, &old, &archives);
+    if desired.mods.len() > MAX_MODS {
+        return Err(Error::bad("Sync would exceed the supported mod-list size"));
+    }
+    check_enabled_compatibility(&candidates, &plan.engine_version)?;
+    check_dependencies(
+        &candidates,
+        &desired,
+        Some(&plan.engine_version),
+        &bundled_mods(&app)?,
+    )?;
+    let bytes = serde_json::to_vec_pretty(&desired)?;
+    let mut created = Vec::new();
+    let publish = (|| -> Result<()> {
+        for item in &plan.mods {
+            if matches!(item.action, SyncAction::Download) {
+                let file_name = format!("{}_{}.zip", item.name, item.version);
+                let target = directory.join(&file_name);
+                // Linking publishes a complete file without overwriting an existing archive.
+                fs::hard_link(staging.path().join(&file_name), &target)?;
+                created.push(target);
+            }
+        }
+        storage::atomic_write(&directory.join("mod-list.json"), &bytes, true)
+    })();
+    if let Err(error) = publish {
+        // A directory sync can fail after the list was already atomically replaced.
+        if fs::read(directory.join("mod-list.json")).is_ok_and(|stored| stored == bytes) {
+            return Err(Error::bad(
+                "Mod list was activated, but disk durability could not be confirmed. Check storage before starting the server",
+            ));
+        }
+        let mut cleanup_failed = false;
+        for path in created {
+            cleanup_failed |= fs::remove_file(path).is_err();
+        }
+        if cleanup_failed {
+            return Err(Error::bad(
+                "Sync failed and a staged archive could not be removed. Inspect the mods directory before starting",
+            ));
+        }
+        return Err(error);
+    }
+    Ok(Json(list(&app)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use std::io::Write;
+    use tower::ServiceExt;
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+    fn err(error: Error) -> std::io::Error {
+        std::io::Error::other(error.message)
+    }
+    fn save(app: &App, mods: &[(&str, [u8; 3])]) -> TestResult {
+        // Metadata prefix from a Factorio 2.1.23 freeplay save.
+        let mut bytes = b"\x02\x00\x01\x00\x17\x00\x02\x00\x00\x00\x08freeplay\x04base\x01\x00\x00\x00\x00\x00\x00\x01\x02\x01\x17\xc6\x56\x01\x00\x01\x00\x00\xa0\x00".to_vec();
+        bytes.push(u8::try_from(mods.len() + 1)?);
+        for (name, version) in std::iter::once(("base", [2, 1, 23])).chain(mods.iter().copied()) {
+            bytes.push(u8::try_from(name.len())?);
+            bytes.extend(name.as_bytes());
+            bytes.extend(version);
+            bytes.extend([0; 4]);
+        }
+        let mut writer = zip::ZipWriter::new(fs::File::create(app.saves_path().join("world.zip"))?);
+        writer.start_file(
+            "world/level-init.dat",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        writer.write_all(&bytes)?;
+        writer.finish()?;
+        Ok(())
+    }
+    fn archive(app: &App, name: &str, version: &str, dependencies: &[&str]) -> TestResult {
+        let folder = directory(app).map_err(err)?;
+        let mut writer = zip::ZipWriter::new(fs::File::create(
+            folder.join(format!("{name}_{version}.zip")),
+        )?);
+        writer.start_file(
+            format!("{name}_{version}/info.json"),
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        writer.write_all(&serde_json::to_vec(&serde_json::json!({"name":name,"version":version,"title":name,"author":"Fixture","factorio_version":"2.1","dependencies":dependencies}))?)?;
+        writer.finish()?;
+        Ok(())
+    }
+    async fn setup() -> std::result::Result<(tempfile::TempDir, App), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let app = App::new(temp.path().into(), None).map_err(err)?;
+        app.inner.lock().await.status.version = Some("2.1.23".into());
+        Ok((temp, app))
+    }
+    #[tokio::test]
+    async fn sync_switches_exact_local_version_and_disables_extras_via_json_api() -> TestResult {
+        let (_temp, app) = setup().await?;
+        save(&app, &[("demo", [1, 0, 0])])?;
+        archive(&app, "demo", "1.0.0", &["base"])?;
+        archive(&app, "demo", "2.0.0", &["base"])?;
+        archive(&app, "extra", "1.0.0", &["base"])?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        assert!(
+            plan.mods
+                .iter()
+                .any(|item| item.name == "demo" && matches!(item.action, SyncAction::Switch))
+        );
+        assert_eq!(plan.disable, vec!["extra"]);
+        let response = crate::api::router(app.clone(), &_temp.path().join("static"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/saves/world.zip/mods/sync")
+                    .header("host", "localhost:9400")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(
+                        &serde_json::json!({"revision":plan.revision}),
+                    )?))?,
+            )
+            .await?;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await?;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let result: ModsDocument = serde_json::from_slice(&bytes)?;
+        assert!(
+            result
+                .mods
+                .iter()
+                .any(|item| item.name == "demo" && item.version == "1.0.0" && item.enabled)
+        );
+        assert!(
+            result
+                .mods
+                .iter()
+                .any(|item| item.name == "extra" && !item.enabled)
+        );
+        assert!(
+            directory(&app)
+                .map_err(err)?
+                .join("demo_2.0.0.zip")
+                .exists()
+        );
+        validate_start(&app, "2.1.23").map_err(err)?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn missing_download_credentials_and_stale_plans_preserve_mods() -> TestResult {
+        let (_temp, app) = setup().await?;
+        save(&app, &[("missing", [1, 0, 0])])?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        assert!(!plan.blockers.is_empty());
+        assert!(
+            apply(
+                State(app.clone()),
+                Path("world.zip".into()),
+                Ok(Json(SyncRequest {
+                    revision: plan.revision
+                }))
+            )
+            .await
+            .is_err()
+        );
+        assert!(!directory(&app).map_err(err)?.join("mod-list.json").exists());
+        save(&app, &[])?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        archive(&app, "extra", "1.0.0", &["base"])?;
+        let result = apply(
+            State(app.clone()),
+            Path("world.zip".into()),
+            Ok(Json(SyncRequest {
+                revision: plan.revision,
+            })),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(Error {
+                status: StatusCode::CONFLICT,
+                ..
+            })
+        ));
+        assert!(!directory(&app).map_err(err)?.join("mod-list.json").exists());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn incompatible_dependencies_and_running_server_block_activation() -> TestResult {
+        let (_temp, app) = setup().await?;
+        save(&app, &[("demo", [1, 0, 0])])?;
+        archive(&app, "demo", "1.0.0", &["missing"])?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        assert!(
+            apply(
+                State(app.clone()),
+                Path("world.zip".into()),
+                Ok(Json(SyncRequest {
+                    revision: plan.revision
+                }))
+            )
+            .await
+            .is_err()
+        );
+        assert!(!directory(&app).map_err(err)?.join("mod-list.json").exists());
+        save(&app, &[])?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        app.inner.lock().await.status.state = ServerState::Running;
+        let result = apply(
+            State(app.clone()),
+            Path("world.zip".into()),
+            Ok(Json(SyncRequest {
+                revision: plan.revision,
+            })),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(Error {
+                status: StatusCode::CONFLICT,
+                ..
+            })
+        ));
+        Ok(())
+    }
+}
