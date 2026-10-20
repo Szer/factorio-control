@@ -31,23 +31,22 @@ export default function Saves({ status }: { status: Status }) {
   });
   const promote = useSessionMutation({
     mutationFn: api.selectSave,
-    onSuccess: async (result) => {
-      await client.cancelQueries({ queryKey: ["selection"] });
-      client.setQueryData(["selection"], result);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["selection"], result);
     },
   });
   const upload = useSessionMutation({
     mutationFn: api.upload,
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ["saves"] });
+    onSuccess: async (_result, _variables, session) => {
+      await session.refresh([["saves"]]);
     },
   });
   const sync = useSessionMutation({
     mutationFn: api.syncSaveMods,
-    onSuccess: async (result) => {
-      await client.cancelQueries({ queryKey: ["mods"] });
-      client.setQueryData(["mods"], result);
-      setSyncPlan(null);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["mods"], result, () => {
+        setSyncPlan(null);
+      });
     },
   });
   const review = useSessionMutation({

@@ -113,26 +113,50 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const retainedIdentity = retained?.user
     ? JSON.stringify(retained.user)
     : null;
-  const preparedIdentity = useRef<string | null | undefined>(undefined);
+  const preparedSession = useRef<SessionStatus | undefined>(undefined);
   useEffect(() => {
-    if (preparedIdentity.current === identity) return;
+    // Fixed editor queries keep their mounted forms through suspended sessions.
+    for (const key of [
+      "status",
+      "raw-settings",
+      "manager",
+      "admins",
+      "mod-settings",
+      "mods",
+      "accounts",
+    ]) {
+      client.setQueryDefaults([key], { gcTime: Infinity });
+    }
+  }, [client]);
+  useEffect(() => {
+    if (preparedSession.current === session.data) return;
+    const preserving =
+      retainedIdentity !== null &&
+      (identity === null || identity === retainedIdentity);
     let mounted = true;
     client
       .cancelQueries({ predicate: (query) => query.queryKey[0] !== "auth" })
       .then(() => {
         if (!mounted) return;
-        preparedIdentity.current = identity;
-        client.removeQueries({
-          predicate: (query) => query.queryKey[0] !== "auth",
-        });
+        preparedSession.current = session.data;
+        if (!preserving)
+          client.removeQueries({
+            predicate: (query) => query.queryKey[0] !== "auth",
+          });
         client.getMutationCache().clear();
-        if (session.data?.user) setRetained(session.data);
+        if (session.data?.user) {
+          setRetained(session.data);
+          if (preserving)
+            return client.invalidateQueries({
+              predicate: (query) => query.queryKey[0] !== "auth",
+            });
+        }
       })
       .catch(() => undefined);
     return () => {
       mounted = false;
     };
-  }, [client, identity, session.data]);
+  }, [client, identity, session.data, retainedIdentity]);
   useEffect(() => {
     const expire = () => {
       client.setQueryData<SessionStatus>(authKey, {
@@ -321,15 +345,17 @@ export function SessionMenu() {
   const client = useQueryClient();
   const reset = async () => {
     window.dispatchEvent(new Event(authDiscardEvent));
-    await client.cancelQueries();
-    client.removeQueries({
-      predicate: (query) => query.queryKey[0] !== "auth",
-    });
-    client.getMutationCache().clear();
     client.setQueryData<SessionStatus>(authKey, {
       user: null,
       expires_at: null,
     });
+    const signedOut = client.getQueryData(authKey);
+    await client.cancelQueries();
+    if (client.getQueryData(authKey) !== signedOut) return;
+    client.removeQueries({
+      predicate: (query) => query.queryKey[0] !== "auth",
+    });
+    client.getMutationCache().clear();
   };
   const logout = useMutation({ mutationFn: authApi.logout, onSuccess: reset });
   if (!user) return null;
@@ -387,7 +413,6 @@ function AccountEditor({
   close: () => void;
 }) {
   const { user } = useAccess();
-  const client = useQueryClient();
   const [role, setRole] = useState(account.role);
   const [password, setPassword] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -399,20 +424,20 @@ function AccountEditor({
         role,
         password: password || null,
       }),
-    onSuccess: async (result) => {
-      setPassword("");
-      await client.cancelQueries({ queryKey: ["accounts"] });
-      client.setQueryData(["accounts"], result);
-      close();
-      await client.invalidateQueries({ queryKey: authKey });
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["accounts"], result, () => {
+        setPassword("");
+        close();
+      });
+      await session.refresh([authKey]);
     },
   });
   const remove = useSessionMutation({
     mutationFn: () => authApi.delete(document.revision, account.username),
-    onSuccess: async (result) => {
-      await client.cancelQueries({ queryKey: ["accounts"] });
-      client.setQueryData(["accounts"], result);
-      close();
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["accounts"], result, () => {
+        close();
+      });
     },
   });
   return (
@@ -489,7 +514,6 @@ function AccountEditor({
 
 export function AccountPanel() {
   const { canAdmin } = useAccess();
-  const client = useQueryClient();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<Role>("viewer");
@@ -510,12 +534,12 @@ export function AccountPanel() {
         role,
       });
     },
-    onSuccess: async (result) => {
-      await client.cancelQueries({ queryKey: ["accounts"] });
-      client.setQueryData(["accounts"], result);
-      setUsername("");
-      setPassword("");
-      setRole("viewer");
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["accounts"], result, () => {
+        setUsername("");
+        setPassword("");
+        setRole("viewer");
+      });
     },
   });
   if (!canAdmin) return null;

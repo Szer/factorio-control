@@ -370,3 +370,132 @@ it("allows a 200 MiB mod ZIP through the upload flow", async () => {
   });
   expect(screen.queryByText(/limited to/)).toBeNull();
 });
+
+it.each(["expiry", "account switch"] as const)(
+  "does not publish a completed start across %s while cancellation is pending",
+  async (replacement) => {
+    const { authKey } = await import("../src/authApi");
+    vi.spyOn(api, "start").mockResolvedValue({ ...stopped, state: "starting" });
+    const { client } = mount(<ServerControls status={stopped} />);
+    let release: (() => void) | undefined;
+    const originalCancel = client.cancelQueries.bind(client);
+    vi.spyOn(client, "cancelQueries").mockImplementation((filters, options) =>
+      filters?.queryKey?.[0] === "status"
+        ? new Promise<void>((resolve) => {
+            release = resolve;
+          })
+        : originalCancel(filters, options),
+    );
+    const user = userEvent.setup();
+    await waitFor(() => {
+      expect(
+        screen
+          .getByRole("button", { name: "Start server" })
+          .hasAttribute("disabled"),
+      ).toBe(false);
+    });
+    await user.click(screen.getByRole("button", { name: "Start server" }));
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Start server",
+      }),
+    );
+    await waitFor(() => {
+      expect(release).toBeTypeOf("function");
+    });
+    const nextStatus = { ...stopped, state: "running" as const };
+    act(() => {
+      client.setQueryData(
+        authKey,
+        replacement === "expiry"
+          ? { user: null, expires_at: null }
+          : {
+              user: {
+                username: "another",
+                account_id: "another-account",
+                role: "admin",
+                must_change_password: false,
+              },
+              expires_at: 9999999999,
+            },
+      );
+      client.setQueryData(["status"], nextStatus);
+    });
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Working…")).toBeNull();
+    });
+    expect(client.getQueryData(["status"])).toEqual(nextStatus);
+    expect(screen.getByRole("dialog")).toBeTruthy();
+  },
+);
+
+it("preserves the create-save draft when its refresh finishes after session expiry", async () => {
+  const { authKey } = await import("../src/authApi");
+  vi.spyOn(operations, "createSave").mockResolvedValue({
+    name: "draft.zip",
+    revision: "new",
+    size_bytes: 1,
+    modified_at: 1,
+  });
+  const { client } = mount(<SaveTools stopped />);
+  let release: (() => void) | undefined;
+  vi.spyOn(client, "invalidateQueries").mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "New save" }));
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "draft.zip");
+  await user.click(screen.getByRole("button", { name: "Create save" }));
+  await waitFor(() => {
+    expect(release).toBeTypeOf("function");
+  });
+  act(() => {
+    client.setQueryData(authKey, { user: null, expires_at: null });
+  });
+  await act(async () => {
+    release?.();
+    await Promise.resolve();
+  });
+  expect(
+    await screen.findByRole("button", { name: "Create save" }),
+  ).toBeTruthy();
+  expect(screen.getByRole("textbox", { name: "Name" })).toHaveProperty(
+    "value",
+    "draft.zip",
+  );
+});
+
+it("reports an expired session before sending a mutation request", async () => {
+  const { authKey } = await import("../src/authApi");
+  const start = vi.spyOn(api, "start");
+  const { client } = mount(<ServerControls status={stopped} />);
+  const user = userEvent.setup();
+  await waitFor(() => {
+    expect(
+      screen
+        .getByRole("button", { name: "Start server" })
+        .hasAttribute("disabled"),
+    ).toBe(false);
+  });
+  await user.click(screen.getByRole("button", { name: "Start server" }));
+  act(() => {
+    client.setQueryData(authKey, { user: null, expires_at: null });
+  });
+  await user.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Start server",
+    }),
+  );
+  expect(await screen.findByRole("alert")).toHaveProperty(
+    "textContent",
+    "Sign in again before changing server data.",
+  );
+  expect(start).not.toHaveBeenCalled();
+});

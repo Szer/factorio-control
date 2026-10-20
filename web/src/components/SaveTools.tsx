@@ -1,6 +1,6 @@
 import { useSessionMutation } from "../useSessionMutation";
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Archive, Plus, RotateCcw } from "lucide-react";
 import { errorMessage, formatBytes, formatDate } from "../api";
 import { operations } from "../operationsApi";
@@ -9,13 +9,14 @@ import { Loading, Modal, Notice } from "./ui";
 export function SaveTools({ stopped }: { stopped: boolean }) {
   const [dialog, setDialog] = useState<"create" | "archive" | null>(null);
   const [name, setName] = useState("");
-  const client = useQueryClient();
   const create = useSessionMutation({
     mutationFn: operations.createSave,
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ["saves"] });
-      setDialog(null);
-      setName("");
+    onSuccess: async (_result, _variables, session) => {
+      await session.refresh([["saves"]]);
+      session.commit(() => {
+        setDialog(null);
+        setName("");
+      });
     },
   });
   return (
@@ -117,18 +118,14 @@ function ArchivedSaves({
   stopped: boolean;
   close: () => void;
 }) {
-  const client = useQueryClient();
   const query = useQuery({
     queryKey: ["archived-saves"],
     queryFn: operations.archivedSaves,
   });
   const restore = useSessionMutation({
     mutationFn: operations.restoreSave,
-    onSuccess: async () => {
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ["saves"] }),
-        client.invalidateQueries({ queryKey: ["archived-saves"] }),
-      ]);
+    onSuccess: async (_result, _variables, session) => {
+      await session.refresh([["saves"], ["archived-saves"]]);
     },
   });
   return (
@@ -198,15 +195,13 @@ export function ArchiveSaveButton({
   reason: string | undefined;
 }) {
   const [open, setOpen] = useState(false);
-  const client = useQueryClient();
   const mutation = useSessionMutation({
     mutationFn: operations.archiveSave,
-    onSuccess: async () => {
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ["saves"] }),
-        client.invalidateQueries({ queryKey: ["archived-saves"] }),
-      ]);
-      setOpen(false);
+    onSuccess: async (_result, _variables, session) => {
+      await session.refresh([["saves"], ["archived-saves"]]);
+      session.commit(() => {
+        setOpen(false);
+      });
     },
   });
   return (

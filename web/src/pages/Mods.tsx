@@ -1,3 +1,4 @@
+import type { SessionMutationContext } from "../useSessionMutation";
 import { useSessionMutation } from "../useSessionMutation";
 import { Fragment, useRef, useState } from "react";
 import {
@@ -47,18 +48,16 @@ function ModRow({
   const enable = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: api.enableMod,
-    onSuccess: async (result) => {
-      await client.cancelQueries({ queryKey: ["mods"] });
-      client.setQueryData(["mods"], result);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["mods"], result);
     },
   });
   const update = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: api.updateMod,
-    onSuccess: async (result) => {
-      await client.cancelQueries({ queryKey: ["mods"] });
-      client.setQueryData(["mods"], result);
-      await client.invalidateQueries({ queryKey: ["mod-settings"] });
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["mods"], result);
+      await session.refresh([["mod-settings"]]);
     },
   });
   const incompatible = updates.data?.compatible === false;
@@ -306,18 +305,17 @@ function ModWorkflows({
   const action = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: (run: () => Promise<ModsDocument | undefined>) => run(),
-    onSuccess: async (result) => {
-      if (result) {
-        await client.cancelQueries({ queryKey: ["mods"] });
-        client.setQueryData(["mods"], result);
-      }
-      setConfirmation(null);
-      preview.reset();
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ["mods"] }),
-        client.invalidateQueries({ queryKey: ["mod-settings"] }),
-        client.invalidateQueries({ queryKey: ["mod-packs"] }),
-        client.invalidateQueries({ queryKey: ["mod-updates"] }),
+    onSuccess: async (result, _variables, session) => {
+      if (result) await session.publish(["mods"], result);
+      session.commit(() => {
+        setConfirmation(null);
+        preview.reset();
+      });
+      await session.refresh([
+        ["mods"],
+        ["mod-settings"],
+        ["mod-packs"],
+        ["mod-updates"],
       ]);
     },
   });
@@ -574,14 +572,22 @@ function ModWorkflows({
                   className="toolbar"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    action.mutate(async () => {
-                      await modWorkflowApi.createPack(
-                        document.revision,
-                        packName,
-                      );
-                      setPackName("");
-                      return undefined;
-                    });
+                    action.mutate(
+                      async () => {
+                        await modWorkflowApi.createPack(
+                          document.revision,
+                          packName,
+                        );
+                        return undefined;
+                      },
+                      {
+                        onSuccess: (_result, _variables, session) => {
+                          session?.commit(() => {
+                            setPackName("");
+                          });
+                        },
+                      },
+                    );
                   }}
                 >
                   <input
@@ -817,31 +823,35 @@ function StartupEditor({
   const [draft, setDraft] = useState(initial.settings);
   const [seenRevision, setSeenRevision] = useState(initial.revision);
   const fileInput = useRef<HTMLInputElement>(null);
-  const client = useQueryClient();
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline.settings);
   useUnsavedChanges(dirty);
-  async function receive(result: ModSettingsDocument) {
-    setBaseline(result);
-    setDraft(result.settings);
-    await client.cancelQueries({ queryKey: ["mod-settings"] });
-    client.setQueryData(["mod-settings"], result);
-    client.invalidateQueries({ queryKey: ["mods"] }).catch(() => undefined);
+  async function receive(
+    result: ModSettingsDocument,
+    session: SessionMutationContext,
+    after?: () => undefined,
+  ) {
+    await session.publish(["mod-settings"], result, () => {
+      setBaseline(result);
+      setDraft(result.settings);
+      after?.();
+    });
+    await session.refresh([["mods"]]);
   }
   const save = useSessionMutation({
     mutationFn: api.saveModSettings,
-    onSuccess: receive,
+    onSuccess: (result, _variables, session) => receive(result, session),
   });
   const upload = useSessionMutation({
     mutationFn: api.uploadModSettings,
-    onSuccess: receive,
+    onSuccess: (result, _variables, session) => receive(result, session),
   });
   const reload = useSessionMutation({
     mutationFn: api.modSettings,
-    onSuccess: async (result) => {
-      await receive(result);
-      save.reset();
-      upload.reset();
-    },
+    onSuccess: (result, _variables, session) =>
+      receive(result, session, () => {
+        save.reset();
+        upload.reset();
+      }),
   });
   const busy = save.isPending || upload.isPending || reload.isPending;
   if (initial.revision !== seenRevision) {
@@ -1139,12 +1149,9 @@ export default function Mods({
   const upload = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: api.uploadMod,
-    onSuccess: async (result) => {
-      await client.cancelQueries({ queryKey: ["mods"] });
-      client.setQueryData(["mods"], result);
-      client
-        .invalidateQueries({ queryKey: ["mod-settings"] })
-        .catch(() => undefined);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["mods"], result);
+      await session.refresh([["mod-settings"]]);
     },
   });
   const stopped =

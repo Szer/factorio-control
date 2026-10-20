@@ -106,7 +106,7 @@ it("signs in, clears old query data, and signs out without leaving protected sta
   expect(screen.queryByDisplayValue("private draft")).toBeNull();
 });
 
-it("clears protected caches and suspends drafts when a background status poll expires the session", async () => {
+it("suspends cached data and drafts when a background status poll expires the session", async () => {
   const status = vi.spyOn(authApi, "status").mockResolvedValue(administrator);
   const queryClient = mountGate();
   expect(await screen.findByText("Protected admin")).toBeTruthy();
@@ -123,7 +123,9 @@ it("clears protected caches and suspends drafts when a background status poll ex
   });
   expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
   await waitFor(() => {
-    expect(queryClient.getQueryData(["settings"])).toBeUndefined();
+    expect(queryClient.getQueryData(["settings"])).toEqual({
+      token: "synthetic-test-value",
+    });
   });
   expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
   expect(screen.queryByRole("textbox", { name: "Secret draft" })).toBeNull();
@@ -156,7 +158,7 @@ it("remounts the app and clears privileged caches when the session role changes"
   expect(queryClient.getQueryData(["settings"])).toBeUndefined();
 });
 
-it("handles unauthorized API responses without retaining cached data", async () => {
+it("hides cached protected data after unauthorized API responses", async () => {
   vi.spyOn(authApi, "status").mockResolvedValue(administrator);
   const queryClient = mountGate();
   expect(await screen.findByText("Protected admin")).toBeTruthy();
@@ -165,7 +167,9 @@ it("handles unauthorized API responses without retaining cached data", async () 
     authExpired();
   });
   expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
-  expect(queryClient.getQueryData(["settings"])).toBeUndefined();
+  expect(queryClient.getQueryData(["settings"])).toEqual({
+    token: "synthetic-test-value",
+  });
 });
 
 it("shows failed login without mounting the app or retaining the password", async () => {
@@ -458,4 +462,49 @@ it("locks cached content at its session deadline even without another successful
   expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
   expect(queryClient.getQueryData(authKey)).toEqual(signedOut);
   expect(screen.queryByRole("textbox", { name: "Secret draft" })).toBeNull();
+});
+
+it("does not let delayed sign-out cleanup clear a newly authenticated identity", async () => {
+  vi.spyOn(authApi, "status").mockResolvedValue(administrator);
+  vi.spyOn(authApi, "logout").mockResolvedValue(undefined);
+  vi.spyOn(authApi, "login").mockResolvedValue({
+    ...administrator,
+    user: {
+      username: "another",
+      account_id: "another-account",
+      role: "admin",
+      must_change_password: false,
+    },
+  });
+  const queryClient = mountGate();
+  await screen.findByText("Protected admin");
+  let release: (() => void) | undefined;
+  const originalCancel = queryClient.cancelQueries.bind(queryClient);
+  vi.spyOn(queryClient, "cancelQueries").mockImplementation(
+    (filters, options) =>
+      filters === undefined
+        ? new Promise<void>((resolve) => {
+            release = resolve;
+          })
+        : originalCancel(filters, options),
+  );
+  const user = userEvent.setup();
+  await user.click(screen.getByText("owner"));
+  await user.click(screen.getByRole("button", { name: "Sign out" }));
+  await user.type(await screen.findByLabelText("Account name"), "another");
+  await user.type(screen.getByLabelText("Password"), "synthetic-password");
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+  await screen.findByText("another");
+  queryClient.setQueryData(["new-account-cache"], "new-account-data");
+  await act(async () => {
+    release?.();
+    await Promise.resolve();
+  });
+  expect(queryClient.getQueryData<SessionStatus>(authKey)?.user?.username).toBe(
+    "another",
+  );
+  expect(queryClient.getQueryData(["new-account-cache"])).toBe(
+    "new-account-data",
+  );
+  expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
 });

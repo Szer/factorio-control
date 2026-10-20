@@ -2,7 +2,7 @@ import { useSessionMutation } from "../useSessionMutation";
 import { useState } from "react";
 import { useUnsavedChanges } from "../useUnsavedChanges";
 import type { SyntheticEvent } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   LoaderCircle,
   Plus,
@@ -32,25 +32,24 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
   }
   const [name, setName] = useState("");
   const [validation, setValidation] = useState<string | null>(null);
-  const client = useQueryClient();
   const mutation = useSessionMutation({
     mutationFn: api.saveAdmins,
-    onSuccess: async (result) => {
-      setBaseline(result);
-      setAdmins(result.admins);
-      await client.cancelQueries({ queryKey: ["admins"] });
-      client.setQueryData(["admins"], result);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["admins"], result, () => {
+        setBaseline(result);
+        setAdmins(result.admins);
+      });
     },
   });
   const reload = useSessionMutation({
     mutationFn: api.admins,
-    onSuccess: async (result) => {
-      setBaseline(result);
-      setAdmins(result.admins);
-      mutation.reset();
-      setValidation(null);
-      await client.cancelQueries({ queryKey: ["admins"] });
-      client.setQueryData(["admins"], result);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["admins"], result, () => {
+        setBaseline(result);
+        setAdmins(result.admins);
+        mutation.reset();
+        setValidation(null);
+      });
     },
   });
   function add(event: SyntheticEvent<HTMLFormElement>) {

@@ -1,8 +1,9 @@
+import type { SessionMutationContext } from "../useSessionMutation";
 import { useSessionMutation } from "../useSessionMutation";
 import { operations } from "../operationsApi";
 import { useEffect, useState } from "react";
 import type { SyntheticEvent } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   api,
   ApiError,
@@ -228,27 +229,31 @@ function ServerForm({ initial }: { initial: RawSettingsDocument }) {
   const [text, setText] = useState(JSON.stringify(initial.settings, null, 2));
   const [mode, setMode] = useState<"form" | "raw">("form");
   const [validation, setValidation] = useState<string | null>(null);
-  const client = useQueryClient();
   const dirty = text !== JSON.stringify(baseline.settings, null, 2);
   useUnsavedChanges(dirty);
-  async function receive(result: RawSettingsDocument) {
-    setBaseline(result);
-    setText(JSON.stringify(result.settings, null, 2));
-    await client.cancelQueries({ queryKey: ["raw-settings"] });
-    client.setQueryData(["raw-settings"], result);
-    client.invalidateQueries({ queryKey: ["settings"] }).catch(() => undefined);
+  async function receive(
+    result: RawSettingsDocument,
+    session: SessionMutationContext,
+    after?: () => undefined,
+  ) {
+    await session.publish(["raw-settings"], result, () => {
+      setBaseline(result);
+      setText(JSON.stringify(result.settings, null, 2));
+      after?.();
+    });
+    await session.refresh([["settings"]]);
   }
   const save = useSessionMutation({
     mutationFn: api.saveRawSettings,
-    onSuccess: receive,
+    onSuccess: (result, _variables, session) => receive(result, session),
   });
   const reload = useSessionMutation({
     mutationFn: api.rawSettings,
-    onSuccess: async (result) => {
-      await receive(result);
-      save.reset();
-      setValidation(null);
-    },
+    onSuccess: (result, _variables, session) =>
+      receive(result, session, () => {
+        save.reset();
+        setValidation(null);
+      }),
   });
   const busy = save.isPending || reload.isPending;
   let draft: Record<string, unknown> = {};
@@ -531,26 +536,30 @@ function ManagerForm({ initial }: { initial: ManagerDocument }) {
     setValidation(null);
   }
   const [validation, setValidation] = useState<string | null>(null);
-  const client = useQueryClient();
   const dirty = text !== JSON.stringify(baseline.settings, null, 2);
   useUnsavedChanges(dirty);
-  async function receive(result: ManagerDocument) {
-    setBaseline(result);
-    setDraft(result.settings);
-    await client.cancelQueries({ queryKey: ["manager"] });
-    client.setQueryData(["manager"], result);
+  async function receive(
+    result: ManagerDocument,
+    session: SessionMutationContext,
+    after?: () => undefined,
+  ) {
+    await session.publish(["manager"], result, () => {
+      setBaseline(result);
+      setDraft(result.settings);
+      after?.();
+    });
   }
   const save = useSessionMutation({
     mutationFn: api.saveManager,
-    onSuccess: receive,
+    onSuccess: (result, _variables, session) => receive(result, session),
   });
   const reload = useSessionMutation({
     mutationFn: api.manager,
-    onSuccess: async (result) => {
-      await receive(result);
-      save.reset();
-      setValidation(null);
-    },
+    onSuccess: (result, _variables, session) =>
+      receive(result, session, () => {
+        save.reset();
+        setValidation(null);
+      }),
   });
   const busy = save.isPending || reload.isPending;
   return (
