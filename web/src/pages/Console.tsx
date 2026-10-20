@@ -1,5 +1,6 @@
+import { useSessionMutation } from "../useSessionMutation";
 import { useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Pause, Play, RefreshCw, Search, Send, Terminal } from "lucide-react";
 import { api, errorMessage } from "../api";
 import { useAccess } from "../authApi";
@@ -22,7 +23,7 @@ export default function Console({
     !/^\s*\/(?:help|h|players|p|admins|version|time|evolution|seed)(?:\s|$)/i.test(
       command,
     );
-  const send = useMutation({
+  const send = useSessionMutation({
     mutationFn: operations.command,
     onSuccess: () => {
       setCommand("");

@@ -20,6 +20,8 @@ engine = shlex.split(os.environ.get("CONTAINER_ENGINE", "docker"))
 image = sys.argv[1]
 name = "factorio-control-test-" + uuid.uuid4().hex[:12]
 volume = name + "-data"
+network = name + "-network"
+proxy = name + "-proxy"
 origin = "https://control.example.invalid"
 host = "control.example.invalid"
 port = None
@@ -35,16 +37,16 @@ def command(*arguments, check=True, timeout=30):
     return result
 
 
-def request(path, body=None, authenticated=True, request_origin=origin):
+def request(path, body=None, authenticated=True, request_origin=origin, method=None, client_ip="198.51.100.50"):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
-    headers = {"Host": host, "Origin": request_origin}
+    headers = {"Host": host, "Origin": request_origin, "X-Forwarded-For": client_ip}
     if cookie and authenticated:
         headers["Cookie"] = cookie
     if body is not None:
         headers["Content-Type"] = "application/json"
     try:
         connection.request(
-            "POST" if body is not None else "GET",
+            method or ("POST" if body is not None else "GET"),
             path,
             body=None if body is None else json.dumps(body),
             headers=headers,
@@ -89,14 +91,52 @@ def wait_state(states):
 
 try:
     command("volume", "create", volume)
+    command("network", "create", network)
+    proxy_code = r"""
+import http.client
+import http.server
+
+class Proxy(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def forward(self):
+        body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        upstream = http.client.HTTPConnection('control', 8080, timeout=60)
+        try:
+            upstream.request(self.command, self.path, body, dict(self.headers))
+            response = upstream.getresponse()
+            content = response.read()
+            self.send_response(response.status)
+            for key, value in response.getheaders():
+                if key.lower() not in ('content-length', 'transfer-encoding', 'connection'):
+                    self.send_header(key, value)
+            self.send_header('Content-Length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        finally:
+            upstream.close()
+
+    do_GET = forward
+    do_POST = forward
+    do_PUT = forward
+
+http.server.ThreadingHTTPServer(('0.0.0.0', 8081), Proxy).serve_forever()
+"""
+    command("run", "-d", "--name", proxy, "--network", network,
+            "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--pids-limit", "64",
+            "-p", "127.0.0.1::8081", "docker.io/library/python:3.12-alpine", "python", "-c", proxy_code, timeout=120)
+    proxy_ip = json.loads(command("inspect", proxy).stdout)[0]["NetworkSettings"]["Networks"][network]["IPAddress"]
+    require(proxy_ip, "Isolated reverse proxy has no transport address")
     mount = volume + ":/data" + (":U" if engine[-1] == "podman" else "")
     command(
-        "run", "-d", "--name", name, "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
+        "run", "-d", "--name", name, "--network", network, "--network-alias", "control", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
         "-p", "127.0.0.1::8080", "-p", "127.0.0.1::34197/udp",
-        "-e", "FC_PUBLIC_URL=" + origin, "--volume", mount, image,
+        "-e", "FC_PUBLIC_URL=" + origin, "-e", "FC_TRUSTED_PROXIES=" + proxy_ip, "--volume", mount, image,
     )
-    port = int(command("port", name, "8080/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
+    port = int(command("port", proxy, "8081/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
     wait_ready()
     require(request("/api/status", authenticated=False)[0] == 401, "Anonymous access was allowed")
     command("exec", name, "/app/factorio-control", "--healthcheck")
@@ -116,19 +156,33 @@ try:
     status, headers, account = request("/api/auth/login", {"username": "admin", "password": password}, authenticated=False)
     require(status == 200 and not account["user"]["must_change_password"], "Changed account could not sign in")
     cookie = headers.get("set-cookie", headers.get("Set-Cookie", "")).split(";", 1)[0]
+    for attempt in range(6):
+        status = request("/api/auth/login", {"username": "admin", "password": "incorrect-fixture"}, authenticated=False, client_ip="198.51.100.99")[0]
+        require(status == (429 if attempt == 5 else 401), f"Proxy client throttling is not isolated: attempt {attempt + 1}, status {status}")
+    require(request("/api/auth/login", {"username": "admin", "password": password}, authenticated=False)[0] == 200, "An attack from another proxy client blocked valid login")
     require(request("/api/server/stop", {}, request_origin="https://attacker.invalid")[0] == 403, "Cross-origin mutation was allowed")
     status, _, value = request("/api/status")
     require(status == 200 and value["version"] == Path(".factorio-version").read_text().strip(), "Bundled Factorio version differs from configured version")
     require(request("/api/saves/create", {"name": "smoke-world.zip"})[0] == 201, "World creation failed")
+    command("exec", name, "sh", "-c", "printf '[\"fixture-player\"]\\n' > /data/server-whitelist.json")
+    command("exec", name, "sh", "-c", "printf '%s\\n' '[{\"username\":\"banned-fixture\",\"reason\":\"isolated review test\"}]' > /data/server-banlist.json")
+    require(request("/api/server/start", {"save": "smoke-world.zip"})[0] == 409, "Migrated whitelist silently defaulted to disabled")
+    status, _, manager = request("/api/manager-settings")
+    require(status == 200, "Manager settings unavailable")
+    manager["settings"]["use_server_whitelist"] = True
+    require(request("/api/manager-settings", manager, method="PUT")[0] == 200, "Whitelist could not be enabled")
     require(request("/api/server/start", {"save": "smoke-world.zip"})[0] == 200, "Game start failed")
     wait_state({"running", "paused"})
+    require(request("/api/server/command", {"command": "Factorio 1.1", "acknowledge_scripting": False})[0] == 200, "Version-spoof chat fixture failed")
+    time.sleep(0.2)
+    require(request("/api/status")[2]["version"] == Path(".factorio-version").read_text().strip(), "Chat changed the trusted engine version")
     require(request("/api/server/command", {"command": "/players", "acknowledge_scripting": False})[0] == 200, "Game console command failed")
     require(request("/api/server/stop", {})[0] == 200, "Graceful stop failed")
     wait_state({"stopped"})
     require(request("/api/server/start", {"save": "smoke-world.zip"})[0] == 200, "Second game start failed")
     wait_state({"running", "paused"})
     command("restart", "--time", "150", name, timeout=170)
-    port = int(command("port", name, "8080/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
+    port = int(command("port", proxy, "8081/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
     wait_ready()
     require(request("/api/status")[0] == 401, "Session survived restart")
     require(command("exec", name, "test", "!", "-e", "/data/bootstrap-admin.json", check=False).returncode == 0, "Restart recreated bootstrap credentials")
@@ -136,4 +190,6 @@ try:
     print("Image passed: non-root, bridge networking, authentication, password rotation, world creation, game lifecycle and restart persistence.")
 finally:
     command("rm", "--force", name, check=False)
+    command("rm", "--force", proxy, check=False)
     command("volume", "rm", volume, check=False)
+    command("network", "rm", network, check=False)

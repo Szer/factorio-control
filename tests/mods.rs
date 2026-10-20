@@ -762,3 +762,134 @@ fn shortened_dependency_versions_follow_factorio_comparisons() -> TestResult {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn every_valid_mod_name_is_removable_through_its_http_route() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let app = App::new(dir.path().into(), None).map_err(app_error)?;
+    app.inner.lock().await.status.version = Some("2.1.23".into());
+    let router = mods::routes().with_state(app.clone());
+    for name in [
+        "list",
+        "packs",
+        "export",
+        "operation",
+        "upload",
+        "settings",
+        "ordinary",
+    ] {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer.start_file(
+            format!("{name}_1.0.0/info.json"),
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        writer.write_all(&serde_json::to_vec(&serde_json::json!({"name":name,"version":"1.0.0","title":name,"author":"Fixture","factorio_version":"2.1"}))?)?;
+        let bytes = writer.finish()?.into_inner();
+        let revision = mods::list(&app).map_err(app_error)?.revision;
+        mods::install(&app, &revision, &bytes, Some("2.1.23")).map_err(app_error)?;
+        let revision = mods::list(&app).map_err(app_error)?.revision;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/mods/{name}?revision={revision}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK, "mod {name}");
+        assert!(mods::list(&app).map_err(app_error)?.mods.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn asset_mod_over_sixty_four_mib_streams_through_upload_listing_start_and_pack_restore()
+-> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source = tempfile::NamedTempFile::new_in(dir.path())?;
+    let mut writer = zip::ZipWriter::new(source.reopen()?);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    writer.start_file("assets_1.0.0/info.json", options)?;
+    writer.write_all(&serde_json::to_vec(&serde_json::json!({"name":"assets","version":"1.0.0","title":"Assets","author":"Fixture","factorio_version":"2.1"}))?)?;
+    writer.start_file("assets_1.0.0/graphics.bin", options)?;
+    let mut seed = 0x1234_abcd_u32;
+    let mut chunk = [0_u8; 64 * 1024];
+    for value in &mut chunk {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        *value = seed as u8;
+    }
+    for _ in 0..(70 * 16) {
+        writer.write_all(&chunk)?;
+    }
+    writer.finish()?.sync_all()?;
+    assert!(source.as_file().metadata()?.len() > 64 * 1024 * 1024);
+    let data = dir.path().join("data");
+    let app = App::new(data, None).map_err(app_error)?;
+    app.inner.lock().await.status.version = Some("2.1.23".into());
+    let router = mods::routes().with_state(app.clone());
+    let revision = mods::list(&app).map_err(app_error)?.revision;
+    let file = tokio::fs::File::from_std(source.reopen()?);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mods/upload")
+                .header("if-match", revision)
+                .body(Body::from_stream(tokio_util::io::ReaderStream::new(file)))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let document: mods::ModsDocument =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(document.mods.len(), 1);
+    assert_eq!(
+        document.mods[0].size_bytes,
+        source.as_file().metadata()?.len()
+    );
+    mods::validate_start(&app, "2.1.23").map_err(app_error)?;
+    let pack = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mods/packs")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(
+                    &serde_json::json!({"revision":document.revision,"name":"assets"}),
+                )?))?,
+        )
+        .await?;
+    assert_eq!(pack.status(), StatusCode::OK);
+    let packs: Vec<mods::workflows::PackSummary> =
+        serde_json::from_slice(&to_bytes(pack.into_body(), 1024 * 1024).await?)?;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/mods/assets?revision={}", document.revision))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let revision = mods::list(&app).map_err(app_error)?.revision;
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mods/packs/assets/restore")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(
+                    &serde_json::json!({"revision":revision,"pack_revision":packs[0].revision}),
+                )?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    mods::validate_start(&app, "2.1.23").map_err(app_error)?;
+    Ok(())
+}

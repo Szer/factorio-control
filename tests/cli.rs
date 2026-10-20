@@ -88,3 +88,48 @@ fn first_start_bootstraps_without_printing_the_password() -> Result<(), Box<dyn 
     assert!(!String::from_utf8_lossy(&output.stderr).contains(password));
     Ok(())
 }
+
+#[test]
+fn empty_optional_trusted_proxies_allow_main_to_listen() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    for value in ["", "  "] {
+        let temporary = tempfile::tempdir()?;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_factorio-control"))
+            .env("FC_DATA_DIR", temporary.path().join("data"))
+            .env("FC_BIND", "127.0.0.1:0")
+            .env("FC_TRUSTED_PROXIES", value)
+            .env_remove("FC_PUBLIC_URL")
+            .env_remove("FC_FACTORIO_BIN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stderr = child.stderr.take().ok_or("Missing test error pipe")?;
+        let (sender, receiver) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                if line.starts_with("Factorio Control listening on http://127.0.0.1:") {
+                    let _sent = sender.send(true);
+                    return;
+                }
+            }
+            let _sent = sender.send(false);
+        });
+        let listening = receiver.recv_timeout(Duration::from_secs(10));
+        let running = child.try_wait()?.is_none();
+        if running {
+            child.kill()?;
+        }
+        child.wait()?;
+        reader.join().map_err(|_| "Startup output reader failed")?;
+        assert!(
+            matches!(listening, Ok(true)) && running,
+            "Empty optional proxy configuration must reach a live listening server"
+        );
+    }
+    Ok(())
+}

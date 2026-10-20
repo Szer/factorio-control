@@ -341,9 +341,12 @@ fn build_plan(
 
 #[utoipa::path(get, path="/api/saves/{name}/mods", params(("name"=String, Path)), responses((status=200, body=SyncPlan), (status=400, body=ApiError), (status=409, body=ApiError)))]
 pub async fn plan(State(app): State<App>, Path(name): Path<String>) -> Result<Json<SyncPlan>> {
-    let inner = app.inner.lock().await;
-    let (plan, _, _) = build_plan(&app, &name, known_engine(&inner)?)?;
-    Ok(Json(plan))
+    let engine = known_engine(&*app.inner.lock().await)?.to_owned();
+    app.mod_storage(move |app| {
+        let (plan, _, _) = build_plan(&app, &name, &engine)?;
+        Ok(Json(plan))
+    })
+    .await
 }
 
 async fn download_exact(
@@ -354,7 +357,7 @@ async fn download_exact(
     progress: &ProgressGuard,
     completed: usize,
     total: usize,
-) -> Result<Vec<u8>> {
+) -> Result<tempfile::NamedTempFile> {
     let (username, token) = credentials(app)?
         .ok_or_else(|| Error::bad("Configure Factorio username/token to download missing mods"))?;
     let releases = releases(client, &item.name).await?;
@@ -383,20 +386,13 @@ async fn download_exact(
         .send()
         .await
         .map_err(|_| Error::bad("Could not download the required mod from Factorio"))?;
-    let bytes = response_bytes(response, MAX_ARCHIVE).await?;
-    if release.sha1.to_ascii_lowercase() != format!("{:x}", sha1::Sha1::digest(&bytes)) {
-        return Err(Error::bad(
-            "Downloaded mod checksum does not match the portal",
-        ));
-    }
-    let info = validate_archive(&bytes)?;
-    if info.name != item.name || info.version != item.version {
-        return Err(Error::bad(
-            "Downloaded mod does not match the save's required version",
-        ));
-    }
-    check_compatibility(&info, Some(engine))?;
-    Ok(bytes)
+    workflows::download_response(
+        response,
+        release.clone(),
+        item.name.clone(),
+        app.directory.clone(),
+    )
+    .await
 }
 
 fn candidate_list(plan: &SyncPlan, old: &ModList, inventory: &[InstalledMod]) -> ModList {
@@ -451,11 +447,18 @@ async fn apply_impl(
     input: SyncRequest,
     progress: &ProgressGuard,
 ) -> Result<Json<ModsDocument>> {
-    let plan = {
+    let guard = app.mod_operations.clone().lock_owned().await;
+    let engine = {
         let inner = app.inner.lock().await;
         stopped(&inner)?;
-        workflows::ensure_consistent(app)?;
-        let (plan, _, _) = build_plan(app, name, known_engine(&inner)?)?;
+        known_engine(&inner)?.to_owned()
+    };
+    let snapshot = app.clone();
+    let save = name.to_owned();
+    let (plan, storage_guard) = blocking(move || {
+        let guard = guard;
+        workflows::ensure_consistent(&snapshot)?;
+        let (plan, _, _) = build_plan(&snapshot, &save, &engine)?;
         if plan.revision != input.revision {
             return Err(Error::conflict(
                 "Save or mods changed. Review the sync plan again",
@@ -464,12 +467,13 @@ async fn apply_impl(
         if !plan.blockers.is_empty() {
             return Err(Error::bad(&plan.blockers.join(" ")));
         }
-        plan
-    };
+        Ok((plan, guard))
+    })
+    .await?;
     let directory = directory(app)?;
     let staging = tempfile::Builder::new()
         .prefix(".sync-")
-        .tempdir_in(&directory)?;
+        .tempdir_in(&app.directory)?;
     let client = client()?;
     let total = plan
         .mods
@@ -485,7 +489,7 @@ async fn apply_impl(
                 total,
                 Some(item.name.clone()),
             )?;
-            let bytes = download_exact(
+            let file = download_exact(
                 app,
                 item,
                 &plan.engine_version,
@@ -499,105 +503,93 @@ async fn apply_impl(
                 status: error.status,
                 message: format!("{} {}: {}", item.name, item.version, error.message),
             })?;
-            storage::atomic_write(
-                &staging
-                    .path()
-                    .join(format!("{}_{}.zip", item.name, item.version)),
-                &bytes,
-                false,
-            )?;
+            let target = staging
+                .path()
+                .join(format!("{}_{}.zip", item.name, item.version));
+            blocking(move || copy_archive(file.path(), &target)).await?;
             completed += 1;
             progress.update(SyncPhase::Downloading, completed, total, None)?;
         }
     }
     progress.update(SyncPhase::Validating, completed, total, None)?;
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    workflows::ensure_consistent(app)?;
-    let (fresh, mut archives, old) = build_plan(app, name, known_engine(&inner)?)?;
-    if fresh.revision != plan.revision {
-        return Err(Error::conflict(
-            "Save or mods changed during download. Review the sync plan again",
-        ));
-    }
-    let mut candidates = Vec::new();
-    for item in &plan.mods {
-        if matches!(item.action, SyncAction::Bundled) {
-            continue;
-        }
-        if let Some(local) = archives
-            .iter()
-            .find(|local| local.name == item.name && local.version == item.version)
-        {
-            validate_archive(&fs::read(directory.join(&local.file_name))?)?;
-            let mut local = local.clone();
-            local.enabled = true;
-            candidates.push(local);
-        } else {
-            let file_name = format!("{}_{}.zip", item.name, item.version);
-            let bytes = fs::read(staging.path().join(&file_name))?;
-            let info = validate_archive(&bytes)?;
-            let local = InstalledMod {
-                name: info.name,
-                version: info.version,
-                title: info.title,
-                author: info.author,
-                description: info.description,
-                factorio_version: info.factorio_version,
-                dependencies: info.dependencies,
-                enabled: true,
-                file_name,
-                size_bytes: bytes.len() as u64,
-            };
-            archives.push(local.clone());
-            candidates.push(local);
-        }
-    }
-    let desired = candidate_list(&plan, &old, &archives);
-    if desired.mods.len() > MAX_MODS {
-        return Err(Error::bad("Sync would exceed the supported mod-list size"));
-    }
-    check_enabled_compatibility(&candidates, &plan.engine_version)?;
-    check_dependencies(
-        &candidates,
-        &desired,
-        Some(&plan.engine_version),
-        &bundled_mods(app)?,
-    )?;
-    let bytes = serde_json::to_vec_pretty(&desired)?;
     progress.update(SyncPhase::Applying, completed, total, None)?;
-    let mut created = Vec::new();
-    let publish = (|| -> Result<()> {
+    let app = app.clone();
+    let name = name.to_owned();
+    blocking(move || {
+        let _guard = storage_guard;
+        workflows::ensure_consistent(&app)?;
+        let (fresh, mut archives, old) = build_plan(&app, &name, &plan.engine_version)?;
+        if fresh.revision != plan.revision {
+            return Err(Error::conflict(
+                "Save or mods changed during download. Review the sync plan again",
+            ));
+        }
+        let mut candidates = Vec::new();
         for item in &plan.mods {
-            if matches!(item.action, SyncAction::Download) {
+            if matches!(item.action, SyncAction::Bundled) {
+                continue;
+            }
+            if let Some(local) = archives
+                .iter()
+                .find(|local| local.name == item.name && local.version == item.version)
+            {
+                workflows::archive_info(&directory.join(&local.file_name))?;
+                let mut local = local.clone();
+                local.enabled = true;
+                candidates.push(local);
+            } else {
                 let file_name = format!("{}_{}.zip", item.name, item.version);
-                let target = directory.join(&file_name);
-                // Linking publishes a complete file without overwriting an existing archive.
-                fs::hard_link(staging.path().join(&file_name), &target)?;
-                created.push(target);
+                let (info, size_bytes) = workflows::archive_info(&staging.path().join(&file_name))?;
+                let local = InstalledMod {
+                    name: info.name,
+                    version: info.version,
+                    title: info.title,
+                    author: info.author,
+                    description: info.description,
+                    factorio_version: info.factorio_version,
+                    dependencies: info.dependencies,
+                    enabled: true,
+                    file_name,
+                    size_bytes,
+                };
+                archives.push(local.clone());
+                candidates.push(local);
             }
         }
-        storage::atomic_write(&directory.join("mod-list.json"), &bytes, true)
-    })();
-    if let Err(error) = publish {
-        // A directory sync can fail after the list was already atomically replaced.
-        if fs::read(directory.join("mod-list.json")).is_ok_and(|stored| stored == bytes) {
-            return Err(Error::bad(
-                "Mod list was activated, but disk durability could not be confirmed. Check storage before starting the server",
-            ));
+        let desired = candidate_list(&plan, &old, &archives);
+        if desired.mods.len() > MAX_MODS {
+            return Err(Error::bad("Sync would exceed the supported mod-list size"));
         }
-        let mut cleanup_failed = false;
-        for path in created {
-            cleanup_failed |= fs::remove_file(path).is_err();
+        check_enabled_compatibility(&candidates, &plan.engine_version)?;
+        check_dependencies(
+            &candidates,
+            &desired,
+            Some(&plan.engine_version),
+            &bundled_mods(&app)?,
+        )?;
+        let staged: Vec<_> = plan
+            .mods
+            .iter()
+            .filter(|item| matches!(item.action, SyncAction::Download))
+            .map(|item| format!("{}_{}.zip", item.name, item.version))
+            .collect();
+        workflows::begin_transaction(&app, staged.clone(), Vec::new())?;
+        let publish = (|| {
+            for file_name in staged {
+                copy_archive(
+                    &staging.path().join(&file_name),
+                    &directory.join(&file_name),
+                )?;
+            }
+            workflows::write_activation(&app, &desired, None)
+        })();
+        if let Err(error) = publish {
+            workflows::ensure_consistent(&app)?;
+            return Err(error);
         }
-        if cleanup_failed {
-            return Err(Error::bad(
-                "Sync failed and a staged archive could not be removed. Inspect the mods directory before starting",
-            ));
-        }
-        return Err(error);
-    }
-    Ok(Json(list(app)?))
+        Ok(Json(list(&app)?))
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -665,6 +657,7 @@ mod tests {
                 .any(|item| item.name == "demo" && matches!(item.action, SyncAction::Switch))
         );
         assert_eq!(plan.disable, vec!["extra"]);
+        workflows::begin_transaction(&app, Vec::new(), Vec::new()).map_err(err)?;
         let response = crate::test_support::authenticated(
             crate::api::router(app.clone(), &_temp.path().join("static")),
             &app.directory,

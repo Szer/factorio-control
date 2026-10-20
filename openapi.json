@@ -2261,11 +2261,15 @@
       "Account": {
         "type": "object",
         "required": [
+          "account_id",
           "username",
           "role",
           "must_change_password"
         ],
         "properties": {
+          "account_id": {
+            "type": "string"
+          },
           "must_change_password": {
             "type": "boolean"
           },
@@ -2728,6 +2732,9 @@
             "format": "int32",
             "maximum": 1440,
             "minimum": 1
+          },
+          "use_server_whitelist": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false
