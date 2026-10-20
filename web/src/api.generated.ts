@@ -36,6 +36,150 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/manager-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_manager_settings"];
+        put: operations["put_manager_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_mods"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_mod_settings"];
+        put: operations["put_mod_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods/settings/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["download_settings"];
+        put?: never;
+        post: operations["upload_settings"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["upload_mod"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods/{name}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["download_mod"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods/{name}/enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["set_enabled"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods/{name}/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["update_mod"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods/{name}/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_updates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/saves": {
         parameters: {
             query?: never;
@@ -45,6 +189,22 @@ export interface paths {
         };
         get: operations["saves"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/saves/selection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_save_selection"];
+        put: operations["put_save_selection"];
         post?: never;
         delete?: never;
         options?: never;
@@ -116,6 +276,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/raw": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_raw_settings"];
+        put: operations["put_raw_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/status": {
         parameters: {
             query?: never;
@@ -132,16 +308,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/telemetry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["telemetry"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Activity: {
+            /** Format: int64 */
+            id: number;
+            kind: components["schemas"]["ActivityKind"];
+            message: string;
+            /** Format: int64 */
+            timestamp: number;
+        };
+        /** @enum {string} */
+        ActivityKind: "started" | "stopped" | "joined" | "left" | "research_finished";
         AdminsDocument: {
             admins: string[];
             revision: string;
         };
+        AllowCommands: boolean | components["schemas"]["CommandPermission"];
         ApiError: {
             message: string;
+        };
+        /** @enum {string} */
+        CommandPermission: "admins-only";
+        InstalledMod: {
+            author: string;
+            dependencies: string[];
+            description: string;
+            enabled: boolean;
+            factorio_version: string;
+            file_name: string;
+            name: string;
+            /** Format: int64 */
+            size_bytes: number;
+            title: string;
+            version: string;
         };
         LogEntry: {
             /** Format: int64 */
@@ -153,6 +371,84 @@ export interface components {
         };
         /** @enum {string} */
         LogLevel: "info" | "warn" | "error";
+        ManagerSettings: {
+            enable_script_telemetry: boolean;
+            /** Format: int32 */
+            poll_interval_seconds: number;
+            /** Format: int32 */
+            ups_history_minutes: number;
+        };
+        ManagerSettingsDocument: {
+            revision: string;
+            settings: components["schemas"]["ManagerSettings"];
+        };
+        ModEnabledRequest: {
+            enabled: boolean;
+            revision: string;
+        };
+        ModSetting: {
+            components: components["schemas"]["ModSettingComponent"][];
+            kind: components["schemas"]["ModSettingKind"];
+            name: string;
+            value: string;
+        };
+        ModSettingChange: {
+            components?: {
+                [key: string]: string;
+            };
+            value?: string | null;
+        };
+        ModSettingComponent: {
+            kind: components["schemas"]["ModSettingKind"];
+            name: string;
+            value: string;
+        };
+        /** @enum {string} */
+        ModSettingKind: "boolean" | "number" | "string" | "integer" | "unsigned_integer" | "color" | "unsupported";
+        ModSettingsDocument: {
+            available: boolean;
+            revision: string;
+            settings: components["schemas"]["ModSetting"][];
+        };
+        ModSettingsPatch: {
+            changes: {
+                [key: string]: components["schemas"]["ModSettingChange"];
+            };
+            revision: string;
+        };
+        ModUpdateRequest: {
+            revision: string;
+            version: string;
+        };
+        ModUpdates: {
+            authenticated: boolean;
+            factorio_version: string;
+            installed_version: string;
+            latest_version: string | null;
+            message: string | null;
+            name: string;
+        };
+        ModsDocument: {
+            mods: components["schemas"]["InstalledMod"][];
+            portal_authenticated: boolean;
+            revision: string;
+        };
+        RawSettingsDocument: {
+            revision: string;
+            settings: {
+                [key: string]: unknown;
+            };
+        };
+        Research: {
+            force: string;
+            /** Format: int32 */
+            level: number;
+            name: string;
+            /** Format: double */
+            progress: number;
+        };
+        /** @enum {string} */
+        SampleState: "active" | "paused" | "collecting" | "unavailable";
         Save: {
             /** Format: int64 */
             modified_at: number;
@@ -160,21 +456,72 @@ export interface components {
             /** Format: int64 */
             size_bytes: number;
         };
+        SaveSelectionDocument: {
+            revision: string;
+            save: string | null;
+        };
         ServerSettings: {
+            /** Format: int32 */
+            afk_autokick_interval: number;
+            allow_commands: components["schemas"]["AllowCommands"];
             auto_pause: boolean;
+            auto_pause_when_players_connect: boolean;
             /** Format: int32 */
             autosave_interval: number;
+            autosave_only_on_server: boolean;
+            /** Format: int32 */
+            autosave_slots: number;
             description: string;
+            game_password: string;
+            ignore_player_limit_for_returning_players: boolean;
+            /** Format: int32 */
+            max_heartbeats_per_second: number;
             /** Format: int32 */
             max_players: number;
+            /** Format: int32 */
+            max_upload_in_kilobytes_per_second: number;
+            /** Format: int32 */
+            max_upload_slots: number;
+            /** Format: int32 */
+            maximum_segment_size: number;
+            /** Format: int32 */
+            maximum_segment_size_peer_count: number;
+            /** Format: int32 */
+            minimum_latency_in_ticks: number;
+            /** Format: int32 */
+            minimum_segment_size: number;
+            /** Format: int32 */
+            minimum_segment_size_peer_count: number;
             name: string;
+            non_blocking_saving: boolean;
+            only_admins_can_pause_the_game: boolean;
+            password: string;
+            require_user_verification: boolean;
+            tags: string[];
+            token: string;
+            username: string;
             visibility: components["schemas"]["Visibility"];
         };
         /** @enum {string} */
-        ServerState: "stopped" | "starting" | "running" | "stopping" | "failed";
+        ServerState: "stopped" | "starting" | "running" | "paused" | "stopping" | "failed";
         SettingsDocument: {
             revision: string;
             settings: components["schemas"]["ServerSettings"];
+        };
+        Snapshot: {
+            activity: components["schemas"]["Activity"][];
+            available: boolean;
+            enabled: boolean;
+            error: string | null;
+            history: components["schemas"]["UpsPoint"][];
+            players: string[] | null;
+            research: components["schemas"]["Research"][] | null;
+            /** Format: int64 */
+            sampled_at: number | null;
+            /** Format: double */
+            target_ups: number | null;
+            /** Format: double */
+            ups: number | null;
         };
         StartRequest: {
             save: string;
@@ -184,9 +531,20 @@ export interface components {
             binary_available: boolean;
             error: string | null;
             /** Format: int64 */
+            since: number;
+            /** Format: int64 */
             started_at: number | null;
             state: components["schemas"]["ServerState"];
             version: string | null;
+        };
+        UpsPoint: {
+            state: components["schemas"]["SampleState"];
+            /** Format: double */
+            target_ups: number | null;
+            /** Format: int64 */
+            timestamp: number;
+            /** Format: double */
+            ups: number | null;
         };
         Visibility: {
             lan: boolean;
@@ -286,6 +644,438 @@ export interface operations {
             };
         };
     };
+    get_manager_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagerSettingsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    put_manager_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManagerSettingsDocument"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagerSettingsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_mods: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_mod_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModSettingsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    put_mod_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModSettingsPatch"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModSettingsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    download_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    upload_settings: {
+        parameters: {
+            query?: never;
+            header: {
+                "If-Match": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModSettingsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    upload_mod: {
+        parameters: {
+            query?: never;
+            header: {
+                "If-Match": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/zip": string;
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    download_mod: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/zip": unknown;
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    set_enabled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModEnabledRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    update_mod: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModUpdateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_updates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModUpdates"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     saves: {
         parameters: {
             query?: never;
@@ -304,6 +1094,72 @@ export interface operations {
                 };
             };
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_save_selection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SaveSelectionDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    put_save_selection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveSelectionDocument"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SaveSelectionDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -523,6 +1379,72 @@ export interface operations {
             };
         };
     };
+    get_raw_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RawSettingsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    put_raw_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RawSettingsDocument"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RawSettingsDocument"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     status: {
         parameters: {
             query?: never;
@@ -538,6 +1460,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Status"];
+                };
+            };
+        };
+    };
+    telemetry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Snapshot"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
         };

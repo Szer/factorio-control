@@ -1,6 +1,6 @@
 # Factorio Control
 
-A local Factorio control room built with Rust and strict React/TypeScript. The first release manages saves, server settings, game administrators, process lifecycle, and recent logs.
+A local Factorio control room built with Rust and strict React/TypeScript. Manage server lifecycle, saves, mods, startup settings, server settings, and administrators in a Factorio-style interface.
 
 ## Run locally
 
@@ -14,7 +14,7 @@ cd ..
 FC_FACTORIO_BIN=/absolute/path/to/factorio/bin/x64/factorio cargo run --locked
 ```
 
-The executable is optional for exploring the UI; start stays disabled until it is configured. Upload a Factorio ZIP save from Worlds, then choose it in the start dialog.
+The executable is optional for exploring the UI; start stays disabled until it is configured. Upload a Factorio ZIP from Saves and select **Use on next start**. The selection persists across manager restarts.
 
 ## Docker on Linux
 
@@ -30,7 +30,25 @@ To change Factorio version, set one line in `.env`, then rebuild:
 FACTORIO_VERSION=2.1.23
 ```
 
-The persistent `factory-data` volume holds saves, settings, administrators, and game runtime files. Manager settings and administrator files are replaced atomically; upload never overwrites an existing save.
+The persistent `factory-data` volume holds saves, mods, settings, administrators, and game runtime files. Configuration writes are atomic and revision-checked; uploads never overwrite an existing save.
+
+## Overview and telemetry
+
+Overview shows server state and its start time, online players, research progress, recent activity, and UPS history. Manager settings control the polling interval and history duration.
+
+Detailed telemetry is opt-in: enable it in **Settings → Manager settings**. It uses Factorio script commands through private loopback RCON, which disable achievements for that save. Without it, lifecycle and player events remain available from game logs.
+
+UPS is measured from elapsed game ticks against wall-clock time, with a target adjusted for game speed. Paused or unavailable samples appear as gaps. History and activity are bounded in memory and reset when the manager restarts.
+
+## Saves, mods, and settings
+
+- Saves support ZIP upload, download, and selection for the next server start.
+- Mods support ZIP upload, download, enable/disable, compatible update checks, and updates from the official mod portal. Changes require a stopped server; dependency validation reports missing or incompatible mods.
+- Portal downloads require `FACTORIO_USERNAME` and `FACTORIO_TOKEN`, or the username and token in server settings. Upload and download of installed ZIPs require no portal account.
+- Startup settings support typed edits and import/export of `mod-settings.dat`. Import a game-generated file to populate the editor; runtime settings are preserved.
+- Server settings expose the Factorio 2.1.23 fields and a Raw JSON editor for additional keys. Unknown keys survive form edits. Administrators and manager preferences have their own sections within Settings.
+
+Edits survive page navigation. Conflicting writes preserve local drafts and require an explicit reload. Server, administrator, and mod startup settings apply when Factorio next starts.
 
 ## Development
 
@@ -55,8 +73,6 @@ Rust owns the OpenAPI schema; frontend response validators are checked against g
 
 This release is local-only: no panel authentication or remote deployment yet. The service rejects non-loopback bind addresses and foreign Host/Origin headers.
 
-Logs refresh every two seconds. Mod management, RCON commands, scheduled backups, and multiplayer telemetry are not implemented; SQLite is deferred until there is persistent manager metadata to store.
+Scheduled backups and an interactive RCON console are not implemented. Mod dependencies are validated but are not automatically downloaded.
 
-Settings and administrator edits survive page navigation. Conflicting writes preserve local edits and require an explicit reload; settings apply when Factorio next starts.
-
-Uploads are capped at 64 MiB and structurally checked as Factorio ZIPs without extraction. Game-version compatibility is determined by Factorio on launch.
+ZIP uploads are capped at 64 MiB and validated without extraction. Mod archives also have a 256 MiB expanded-size limit. Factorio determines save compatibility on launch.

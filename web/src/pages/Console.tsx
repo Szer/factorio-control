@@ -4,13 +4,13 @@ import { Pause, Play, Search, Terminal } from "lucide-react";
 import { api, errorMessage } from "../api";
 import { EmptyState, Loading, Notice } from "../components/ui";
 
-export default function Console() {
+export default function Console({ interval }: { interval: number }) {
   const [paused, setPaused] = useState(false);
   const [filter, setFilter] = useState("");
   const logs = useQuery({
     queryKey: ["logs"],
     queryFn: api.logs,
-    refetchInterval: paused ? false : 2_000,
+    refetchInterval: paused ? false : interval,
     enabled: !paused,
     refetchOnWindowFocus: false,
   });

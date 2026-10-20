@@ -10,9 +10,9 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { api, ApiError, settingsSchema } from "../src/api";
-import type { SettingsDocument, Status } from "../src/api";
+import type { SettingsDocument, RawSettingsDocument, Status } from "../src/api";
 import SettingsPage from "../src/pages/Settings";
-import Players from "../src/pages/Players";
+import Administrators from "../src/components/Administrators";
 import ServerControls from "../src/components/ServerControls";
 import App from "../src/App";
 
@@ -22,6 +22,28 @@ const settings: SettingsDocument = {
     name: "Nauvis",
     description: "",
     max_players: 12,
+    tags: [],
+    username: "",
+    password: "",
+    token: "",
+    game_password: "",
+    require_user_verification: true,
+    max_upload_in_kilobytes_per_second: 0,
+    max_upload_slots: 5,
+    minimum_latency_in_ticks: 0,
+    max_heartbeats_per_second: 60,
+    ignore_player_limit_for_returning_players: false,
+    allow_commands: "admins-only",
+    autosave_slots: 5,
+    afk_autokick_interval: 0,
+    auto_pause_when_players_connect: false,
+    only_admins_can_pause_the_game: true,
+    autosave_only_on_server: true,
+    non_blocking_saving: false,
+    minimum_segment_size: 25,
+    minimum_segment_size_peer_count: 20,
+    maximum_segment_size: 100,
+    maximum_segment_size_peer_count: 10,
     auto_pause: true,
     autosave_interval: 5,
     visibility: { public: false, lan: true },
@@ -29,6 +51,7 @@ const settings: SettingsDocument = {
 };
 const stopped: Status = {
   state: "stopped",
+  since: 1,
   active_save: null,
   started_at: null,
   binary_available: true,
@@ -52,10 +75,19 @@ afterEach(() => {
 describe("settings and administrators", () => {
   it("locks fields until a settings write completes so later typing cannot be lost", async () => {
     vi.spyOn(api, "settings").mockResolvedValue(structuredClone(settings));
-    let finish: ((document: SettingsDocument) => void) | undefined;
-    vi.spyOn(api, "saveSettings").mockImplementation(
+    vi.spyOn(api, "rawSettings").mockResolvedValue(structuredClone(settings));
+    vi.spyOn(api, "manager").mockResolvedValue({
+      revision: "one",
+      settings: {
+        poll_interval_seconds: 2,
+        ups_history_minutes: 10,
+        enable_script_telemetry: false,
+      },
+    });
+    let finish: ((document: RawSettingsDocument) => void) | undefined;
+    vi.spyOn(api, "saveRawSettings").mockImplementation(
       () =>
-        new Promise<SettingsDocument>((resolve) => {
+        new Promise<RawSettingsDocument>((resolve) => {
           finish = resolve;
         }),
     );
@@ -79,7 +111,16 @@ describe("settings and administrators", () => {
 
   it("keeps edits after a stale-write conflict and does not report success", async () => {
     vi.spyOn(api, "settings").mockResolvedValue(structuredClone(settings));
-    vi.spyOn(api, "saveSettings").mockRejectedValue(
+    vi.spyOn(api, "rawSettings").mockResolvedValue(structuredClone(settings));
+    vi.spyOn(api, "manager").mockResolvedValue({
+      revision: "one",
+      settings: {
+        poll_interval_seconds: 2,
+        ups_history_minutes: 10,
+        enable_script_telemetry: false,
+      },
+    });
+    vi.spyOn(api, "saveRawSettings").mockRejectedValue(
       new ApiError("Settings changed on disk. Reload before saving", 409),
     );
     mount(<SettingsPage />);
@@ -105,7 +146,7 @@ describe("settings and administrators", () => {
       stored = { revision: "two", admins: [...document.admins] };
       return Promise.resolve(structuredClone(stored));
     });
-    const first = mount(<Players />);
+    const first = mount(<Administrators />);
     const user = userEvent.setup();
     await user.type(
       await screen.findByRole("textbox", { name: "Factorio username" }),
@@ -120,7 +161,7 @@ describe("settings and administrators", () => {
     );
     expect(stored.admins).toEqual(["Szer", "paragith"]);
     first.unmount();
-    mount(<Players />);
+    mount(<Administrators />);
     await screen.findByText("paragith");
     expect(screen.getByText("Szer")).toBeDefined();
   });
@@ -128,6 +169,15 @@ describe("settings and administrators", () => {
     window.location.hash = "settings";
     vi.spyOn(api, "status").mockResolvedValue(stopped);
     vi.spyOn(api, "settings").mockResolvedValue(structuredClone(settings));
+    vi.spyOn(api, "rawSettings").mockResolvedValue(structuredClone(settings));
+    vi.spyOn(api, "manager").mockResolvedValue({
+      revision: "one",
+      settings: {
+        poll_interval_seconds: 2,
+        ups_history_minutes: 10,
+        enable_script_telemetry: false,
+      },
+    });
     vi.spyOn(api, "admins").mockResolvedValue({ revision: "one", admins: [] });
     vi.spyOn(api, "saves").mockResolvedValue([]);
     vi.spyOn(api, "logs").mockResolvedValue([]);
@@ -136,8 +186,8 @@ describe("settings and administrators", () => {
     const name = await screen.findByRole("textbox", { name: /Server name/ });
     await user.clear(name);
     await user.type(name, "Still here");
-    await user.click(screen.getByRole("link", { name: "Players" }));
-    await screen.findByRole("heading", { name: "Players", level: 1 });
+    await user.click(screen.getByRole("link", { name: "Saves" }));
+    await screen.findByRole("heading", { name: "Saves", level: 1 });
     await user.click(screen.getByRole("link", { name: "Settings" }));
     await screen.findByRole("heading", { name: "Settings", level: 1 });
     expect(
@@ -148,13 +198,11 @@ describe("settings and administrators", () => {
   });
 });
 
-it("sends the world actually selected in the launch dialog", async () => {
-  const saves = ["alpha.zip", "beta.zip"].map((name) => ({
-    name,
-    size_bytes: 123,
-    modified_at: 1,
-  }));
-  vi.spyOn(api, "saves").mockResolvedValue(saves);
+it("starts the persisted selected save rather than the newest upload", async () => {
+  vi.spyOn(api, "selection").mockResolvedValue({
+    revision: "one",
+    save: "beta.zip",
+  });
   const start = vi.spyOn(api, "start").mockResolvedValue({
     ...stopped,
     state: "starting",
@@ -169,12 +217,11 @@ it("sends the world actually selected in the launch dialog", async () => {
         .hasAttribute("disabled"),
     ).toBe(false);
   });
-  const showModal = vi.fn(function (this: HTMLDialogElement) {
-    this.setAttribute("open", "");
-  });
   Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
     configurable: true,
-    value: showModal,
+    value: function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    },
   });
   Object.defineProperty(HTMLDialogElement.prototype, "close", {
     configurable: true,
@@ -184,17 +231,13 @@ it("sends the world actually selected in the launch dialog", async () => {
   });
   await user.click(screen.getByRole("button", { name: "Start server" }));
   const dialog = screen.getByRole("dialog");
-  await user.selectOptions(
-    within(dialog).getByRole("combobox", { name: "World" }),
-    "beta.zip",
-  );
+  expect(within(dialog).getByText("beta.zip")).toBeDefined();
   await user.click(
     within(dialog).getByRole("button", { name: "Start server" }),
   );
   await waitFor(() => {
     expect(start).toHaveBeenCalledWith("beta.zip");
   });
-  expect(showModal).toHaveBeenCalled();
 });
 
 it("rejects HTML masquerading as a successful API response", async () => {
@@ -222,4 +265,71 @@ it("accepts disabled autosaves and rejects invalid numeric settings", () => {
   expect(
     settingsSchema.safeParse({ ...settings.settings, max_players: -1 }).success,
   ).toBe(false);
+});
+
+it("preserves unknown configuration keys across form and raw editing", async () => {
+  vi.spyOn(api, "rawSettings").mockResolvedValue({
+    revision: "one",
+    settings: { ...settings.settings, mod_specific: { precision: 12 } },
+  });
+  const save = vi
+    .spyOn(api, "saveRawSettings")
+    .mockImplementation((document) =>
+      Promise.resolve({ ...document, revision: "two" }),
+    );
+  mount(<SettingsPage />);
+  const user = userEvent.setup();
+  const name = await screen.findByRole("textbox", { name: "Server name" });
+  await user.clear(name);
+  await user.type(name, "Edited factory");
+  await user.click(screen.getByRole("button", { name: "Raw JSON" }));
+  const raw = screen.getByRole("textbox", { name: "Raw server settings" });
+  expect((raw as HTMLTextAreaElement).value).toContain('"mod_specific"');
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => {
+    expect(save.mock.calls[0]?.[0].settings.name).toBe("Edited factory");
+    expect(save.mock.calls[0]?.[0].settings.mod_specific).toEqual({
+      precision: 12,
+    });
+  });
+});
+
+it("keeps invalid raw JSON editable and does not submit it", async () => {
+  vi.spyOn(api, "rawSettings").mockResolvedValue(structuredClone(settings));
+  const save = vi.spyOn(api, "saveRawSettings");
+  mount(<SettingsPage />);
+  const user = userEvent.setup();
+  await screen.findByRole("textbox", { name: "Server name" });
+  await user.click(screen.getByRole("button", { name: "Raw JSON" }));
+  const raw = screen.getByRole("textbox", { name: "Raw server settings" });
+  await user.clear(raw);
+  await user.type(raw, "broken JSON");
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect((raw as HTMLTextAreaElement).value).toBe("broken JSON");
+  expect(
+    screen.getByText("Enter a valid JSON object. Your draft has been kept."),
+  ).toBeDefined();
+  expect(save).not.toHaveBeenCalled();
+});
+
+it("shows Stop for a paused server", () => {
+  vi.spyOn(api, "selection").mockResolvedValue({
+    revision: "one",
+    save: "test.zip",
+  });
+  mount(<ServerControls status={{ ...stopped, state: "paused" }} />);
+  expect(screen.getByRole("button", { name: "Stop server" })).toBeDefined();
+  expect(screen.queryByRole("button", { name: "Start server" })).toBeNull();
+});
+
+it("does not enable Start without an explicitly selected save", async () => {
+  vi.spyOn(api, "selection").mockResolvedValue({ revision: "one", save: null });
+  mount(<ServerControls status={stopped} />);
+  await waitFor(() => {
+    expect(
+      screen
+        .getByRole("button", { name: "Start server" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+  });
 });

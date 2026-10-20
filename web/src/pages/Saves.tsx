@@ -11,21 +11,30 @@ import {
 import { api, errorMessage, formatBytes, formatDate } from "../api";
 import type { Status } from "../api";
 import { EmptyState, Loading, Notice } from "../components/ui";
-import ServerControls from "../components/ServerControls";
 
-export default function Worlds({ status }: { status: Status }) {
+export default function Saves({ status }: { status: Status }) {
   const [search, setSearch] = useState("");
   const [fileError, setFileError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const saves = useQuery({ queryKey: ["saves"], queryFn: api.saves });
   const client = useQueryClient();
+  const selection = useQuery({
+    queryKey: ["selection"],
+    queryFn: api.selection,
+  });
+  const promote = useMutation({
+    mutationFn: api.selectSave,
+    onSuccess: (result) => {
+      client.setQueryData(["selection"], result);
+    },
+  });
   const upload = useMutation({
     mutationFn: api.upload,
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ["saves"] });
     },
   });
-  const worlds =
+  const filtered =
     saves.data?.filter((save) =>
       save.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
     ) ?? [];
@@ -56,7 +65,7 @@ export default function Worlds({ status }: { status: Status }) {
       ) : (
         <Upload size={16} />
       )}
-      {upload.isPending ? "Uploading…" : "Upload world"}
+      {upload.isPending ? "Uploading…" : "Upload save"}
     </button>
   );
   return (
@@ -76,19 +85,46 @@ export default function Worlds({ status }: { status: Status }) {
         <label className="search-box">
           <Search size={17} />
           <input
-            aria-label="Search worlds"
-            placeholder="Find a world…"
+            aria-label="Search saves"
+            placeholder="Find a save…"
             value={search}
             onChange={(event) => {
               setSearch(event.target.value);
             }}
           />
         </label>
-        <div className="toolbar-actions">
-          <ServerControls status={status} />
-          {uploadButton}
-        </div>
+        <div className="toolbar-actions">{uploadButton}</div>
       </div>
+      <div className="selection-banner">
+        <span>Next server start</span>
+        <strong>{selection.data?.save ?? "No save selected"}</strong>
+        <span className="muted">
+          Selecting a save takes effect on the next start.
+        </span>
+      </div>
+      {selection.isError && <Notice>{errorMessage(selection.error)}</Notice>}
+      {promote.isError && (
+        <Notice>
+          {errorMessage(promote.error)}{" "}
+          <button
+            className="text-button"
+            disabled={selection.isFetching}
+            onClick={() => {
+              client
+                .invalidateQueries({ queryKey: ["selection"] })
+                .catch(() => undefined);
+              promote.reset();
+            }}
+          >
+            Refresh selection
+          </button>
+        </Notice>
+      )}
+      {promote.isSuccess && (
+        <Notice success>
+          {promote.data.save} will be used on the next start.
+        </Notice>
+      )}
       {fileError && <Notice>{fileError}</Notice>}
       {upload.isError && <Notice>{errorMessage(upload.error)}</Notice>}
       {upload.isSuccess && (
@@ -102,19 +138,18 @@ export default function Worlds({ status }: { status: Status }) {
         <section className="panel">
           <EmptyState
             icon={<Box size={32} />}
-            title="Your next world starts here."
+            title="No saves uploaded"
             action={uploadButton}
           >
             Upload a Factorio save to continue your factory. ZIP files up to 64
-            MB; existing worlds are kept intact.
+            MB; existing saves are kept intact.
           </EmptyState>
         </section>
       ) : (
-        <section className="panel worlds-panel">
+        <section className="panel saves-panel">
           <div className="section-heading">
             <h2>
-              Your worlds{" "}
-              <span className="count-badge">{saves.data.length}</span>
+              Saves <span className="count-badge">{saves.data.length}</span>
             </h2>
             <span className="small-label">STORED LOCALLY</span>
           </div>
@@ -122,7 +157,7 @@ export default function Worlds({ status }: { status: Status }) {
             <table>
               <thead>
                 <tr>
-                  <th>WORLD</th>
+                  <th>SAVE</th>
                   <th>LAST MODIFIED</th>
                   <th>SIZE</th>
                   <th>
@@ -131,10 +166,10 @@ export default function Worlds({ status }: { status: Status }) {
                 </tr>
               </thead>
               <tbody>
-                {worlds.map((save) => (
+                {filtered.map((save) => (
                   <tr key={save.name}>
                     <td>
-                      <div className="world-name">
+                      <div className="save-name">
                         <span className="file-icon">
                           <FileArchive size={19} />
                         </span>
@@ -143,7 +178,7 @@ export default function Worlds({ status }: { status: Status }) {
                           <small>
                             {save.name}
                             {status.active_save === save.name
-                              ? " · Current world"
+                              ? " · Loaded session"
                               : ""}
                           </small>
                         </div>
@@ -152,26 +187,51 @@ export default function Worlds({ status }: { status: Status }) {
                     <td>{formatDate(save.modified_at)}</td>
                     <td className="mono">{formatBytes(save.size_bytes)}</td>
                     <td>
-                      <a
-                        className="icon-button"
-                        href={`/api/saves/${encodeURIComponent(save.name)}`}
-                        download={save.name}
-                        aria-label={`Download ${save.name}`}
-                      >
-                        <Download size={17} />
-                      </a>
+                      <div className="row-actions">
+                        <button
+                          className={
+                            selection.data?.save === save.name
+                              ? "button selected-save"
+                              : "button secondary"
+                          }
+                          disabled={
+                            promote.isPending ||
+                            !selection.data ||
+                            selection.data.save === save.name
+                          }
+                          onClick={() => {
+                            if (selection.data)
+                              promote.mutate({
+                                revision: selection.data.revision,
+                                save: save.name,
+                              });
+                          }}
+                        >
+                          {selection.data?.save === save.name
+                            ? "Selected"
+                            : "Use on next start"}
+                        </button>
+                        <a
+                          className="icon-button"
+                          href={`/api/saves/${encodeURIComponent(save.name)}`}
+                          download={save.name}
+                          aria-label={`Download ${save.name}`}
+                        >
+                          <Download size={17} />
+                        </a>
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          {worlds.length === 0 && (
-            <div className="search-empty">No worlds match “{search}”.</div>
+          {filtered.length === 0 && (
+            <div className="search-empty">No saves match “{search}”.</div>
           )}
           <div className="table-footer">
             <span>
-              {worlds.length} {worlds.length === 1 ? "world" : "worlds"}
+              {filtered.length} {filtered.length === 1 ? "save" : "saves"}
             </span>
             <span>Your original save is never overwritten by an upload.</span>
           </div>
@@ -180,8 +240,8 @@ export default function Worlds({ status }: { status: Status }) {
       <div className="subtle-note">
         <FileArchive size={16} />
         <p>
-          Bring a save from your single-player game or another server. Select
-          the world you want when starting the server.
+          Bring a save from your single-player game or another server. Choose
+          “Use on next start” to promote a save to the startup save.
         </p>
       </div>
     </>

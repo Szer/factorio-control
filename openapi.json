@@ -104,6 +104,558 @@
         }
       }
     },
+    "/api/manager-settings": {
+      "get": {
+        "tags": [],
+        "operationId": "get_manager_settings",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagerSettingsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "put_manager_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagerSettingsDocument"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagerSettingsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods": {
+      "get": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "get_mods",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/settings": {
+      "get": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "get_mod_settings",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModSettingsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "put_mod_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModSettingsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModSettingsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/settings/file": {
+      "get": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "download_settings",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "upload_settings",
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModSettingsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/upload": {
+      "post": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "upload_mod",
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/zip": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/{name}/download": {
+      "get": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "download_mod",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/zip": {}
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/{name}/enabled": {
+      "put": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "set_enabled",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModEnabledRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/{name}/update": {
+      "post": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "update_mod",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/{name}/updates": {
+      "get": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "get_updates",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModUpdates"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/saves": {
       "get": {
         "tags": [],
@@ -123,6 +675,80 @@
             }
           },
           "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saves/selection": {
+      "get": {
+        "tags": [],
+        "operationId": "get_save_selection",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveSelectionDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "put_save_selection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSelectionDocument"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveSelectionDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
             "description": "",
             "content": {
               "application/json": {
@@ -385,6 +1011,80 @@
         }
       }
     },
+    "/api/settings/raw": {
+      "get": {
+        "tags": [],
+        "operationId": "get_raw_settings",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RawSettingsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "put_raw_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RawSettingsDocument"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RawSettingsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/status": {
       "get": {
         "tags": [],
@@ -402,10 +1102,75 @@
           }
         }
       }
+    },
+    "/api/telemetry": {
+      "get": {
+        "tags": [],
+        "operationId": "telemetry",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "Activity": {
+        "type": "object",
+        "required": [
+          "id",
+          "timestamp",
+          "kind",
+          "message"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ActivityKind"
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ActivityKind": {
+        "type": "string",
+        "enum": [
+          "started",
+          "stopped",
+          "joined",
+          "left",
+          "research_finished"
+        ]
+      },
       "AdminsDocument": {
         "type": "object",
         "required": [
@@ -425,6 +1190,16 @@
         },
         "additionalProperties": false
       },
+      "AllowCommands": {
+        "oneOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "$ref": "#/components/schemas/CommandPermission"
+          }
+        ]
+      },
       "ApiError": {
         "type": "object",
         "required": [
@@ -432,6 +1207,64 @@
         ],
         "properties": {
           "message": {
+            "type": "string"
+          }
+        }
+      },
+      "CommandPermission": {
+        "type": "string",
+        "enum": [
+          "admins-only"
+        ]
+      },
+      "InstalledMod": {
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "title",
+          "author",
+          "description",
+          "factorio_version",
+          "dependencies",
+          "enabled",
+          "file_name",
+          "size_bytes"
+        ],
+        "properties": {
+          "author": {
+            "type": "string"
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "factorio_version": {
+            "type": "string"
+          },
+          "file_name": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string"
+          },
+          "version": {
             "type": "string"
           }
         }
@@ -471,6 +1304,316 @@
           "error"
         ]
       },
+      "ManagerSettings": {
+        "type": "object",
+        "required": [
+          "enable_script_telemetry",
+          "poll_interval_seconds",
+          "ups_history_minutes"
+        ],
+        "properties": {
+          "enable_script_telemetry": {
+            "type": "boolean"
+          },
+          "poll_interval_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "maximum": 60,
+            "minimum": 1
+          },
+          "ups_history_minutes": {
+            "type": "integer",
+            "format": "int32",
+            "maximum": 1440,
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "ManagerSettingsDocument": {
+        "type": "object",
+        "required": [
+          "revision",
+          "settings"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ManagerSettings"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModEnabledRequest": {
+        "type": "object",
+        "required": [
+          "revision",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModSetting": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "value",
+          "components"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModSettingComponent"
+            }
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ModSettingKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "ModSettingChange": {
+        "type": "object",
+        "properties": {
+          "components": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModSettingComponent": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ModSettingKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "ModSettingKind": {
+        "type": "string",
+        "enum": [
+          "boolean",
+          "number",
+          "string",
+          "integer",
+          "unsigned_integer",
+          "color",
+          "unsupported"
+        ]
+      },
+      "ModSettingsDocument": {
+        "type": "object",
+        "required": [
+          "revision",
+          "available",
+          "settings"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "settings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModSetting"
+            }
+          }
+        }
+      },
+      "ModSettingsPatch": {
+        "type": "object",
+        "required": [
+          "revision",
+          "changes"
+        ],
+        "properties": {
+          "changes": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ModSettingChange"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModUpdateRequest": {
+        "type": "object",
+        "required": [
+          "revision",
+          "version"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModUpdates": {
+        "type": "object",
+        "required": [
+          "name",
+          "installed_version",
+          "latest_version",
+          "authenticated",
+          "factorio_version",
+          "message"
+        ],
+        "properties": {
+          "authenticated": {
+            "type": "boolean"
+          },
+          "factorio_version": {
+            "type": "string"
+          },
+          "installed_version": {
+            "type": "string"
+          },
+          "latest_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ModsDocument": {
+        "type": "object",
+        "required": [
+          "revision",
+          "mods",
+          "portal_authenticated"
+        ],
+        "properties": {
+          "mods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InstalledMod"
+            }
+          },
+          "portal_authenticated": {
+            "type": "boolean"
+          },
+          "revision": {
+            "type": "string"
+          }
+        }
+      },
+      "RawSettingsDocument": {
+        "type": "object",
+        "required": [
+          "revision",
+          "settings"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Research": {
+        "type": "object",
+        "required": [
+          "force",
+          "name",
+          "progress",
+          "level"
+        ],
+        "properties": {
+          "force": {
+            "type": "string"
+          },
+          "level": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "SampleState": {
+        "type": "string",
+        "enum": [
+          "active",
+          "paused",
+          "collecting",
+          "unavailable"
+        ]
+      },
       "Save": {
         "type": "object",
         "required": [
@@ -494,18 +1637,70 @@
           }
         }
       },
+      "SaveSelectionDocument": {
+        "type": "object",
+        "required": [
+          "revision",
+          "save"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "save": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "ServerSettings": {
         "type": "object",
         "required": [
           "name",
           "description",
+          "tags",
           "max_players",
-          "auto_pause",
+          "visibility",
+          "username",
+          "password",
+          "token",
+          "game_password",
+          "require_user_verification",
+          "max_upload_in_kilobytes_per_second",
+          "max_upload_slots",
+          "minimum_latency_in_ticks",
+          "max_heartbeats_per_second",
+          "ignore_player_limit_for_returning_players",
+          "allow_commands",
           "autosave_interval",
-          "visibility"
+          "autosave_slots",
+          "afk_autokick_interval",
+          "auto_pause",
+          "auto_pause_when_players_connect",
+          "only_admins_can_pause_the_game",
+          "autosave_only_on_server",
+          "non_blocking_saving",
+          "minimum_segment_size",
+          "minimum_segment_size_peer_count",
+          "maximum_segment_size",
+          "maximum_segment_size_peer_count"
         ],
         "properties": {
+          "afk_autokick_interval": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "allow_commands": {
+            "$ref": "#/components/schemas/AllowCommands"
+          },
           "auto_pause": {
+            "type": "boolean"
+          },
+          "auto_pause_when_players_connect": {
             "type": "boolean"
           },
           "autosave_interval": {
@@ -514,9 +1709,29 @@
             "maximum": 1440,
             "minimum": 0
           },
+          "autosave_only_on_server": {
+            "type": "boolean"
+          },
+          "autosave_slots": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
           "description": {
             "type": "string",
             "maxLength": 2000
+          },
+          "game_password": {
+            "type": "string"
+          },
+          "ignore_player_limit_for_returning_players": {
+            "type": "boolean"
+          },
+          "max_heartbeats_per_second": {
+            "type": "integer",
+            "format": "int32",
+            "maximum": 240,
+            "minimum": 6
           },
           "max_players": {
             "type": "integer",
@@ -524,10 +1739,69 @@
             "maximum": 65535,
             "minimum": 0
           },
+          "max_upload_in_kilobytes_per_second": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_upload_slots": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "maximum_segment_size": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "maximum_segment_size_peer_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "minimum_latency_in_ticks": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "minimum_segment_size": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "minimum_segment_size_peer_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
           "name": {
             "type": "string",
             "maxLength": 100,
             "minLength": 1
+          },
+          "non_blocking_saving": {
+            "type": "boolean"
+          },
+          "only_admins_can_pause_the_game": {
+            "type": "boolean"
+          },
+          "password": {
+            "type": "string"
+          },
+          "require_user_verification": {
+            "type": "boolean"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "token": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
           },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"
@@ -541,6 +1815,7 @@
           "stopped",
           "starting",
           "running",
+          "paused",
           "stopping",
           "failed"
         ]
@@ -561,6 +1836,87 @@
         },
         "additionalProperties": false
       },
+      "Snapshot": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "available",
+          "sampled_at",
+          "players",
+          "research",
+          "ups",
+          "target_ups",
+          "history",
+          "activity",
+          "error"
+        ],
+        "properties": {
+          "activity": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Activity"
+            }
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpsPoint"
+            }
+          },
+          "players": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "research": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Research"
+            }
+          },
+          "sampled_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "target_ups": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "ups": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
       "StartRequest": {
         "type": "object",
         "required": [
@@ -577,6 +1933,7 @@
         "type": "object",
         "required": [
           "state",
+          "since",
           "active_save",
           "started_at",
           "binary_available",
@@ -599,6 +1956,11 @@
               "null"
             ]
           },
+          "since": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
           "started_at": {
             "type": [
               "integer",
@@ -615,6 +1977,39 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UpsPoint": {
+        "type": "object",
+        "required": [
+          "timestamp",
+          "ups",
+          "target_ups",
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/SampleState"
+          },
+          "target_ups": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "ups": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           }
         }
       },

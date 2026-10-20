@@ -7,8 +7,10 @@ import { Modal, Notice } from "./ui";
 
 export default function ServerControls({ status }: { status: Status }) {
   const [dialog, setDialog] = useState<"start" | "stop" | null>(null);
-  const [selected, setSelected] = useState("");
-  const saves = useQuery({ queryKey: ["saves"], queryFn: api.saves });
+  const selection = useQuery({
+    queryKey: ["selection"],
+    queryFn: api.selection,
+  });
   const client = useQueryClient();
   const mutation = useMutation({
     mutationFn: (action: { kind: "start"; save: string } | { kind: "stop" }) =>
@@ -16,24 +18,25 @@ export default function ServerControls({ status }: { status: Status }) {
     onSuccess: async (result) => {
       client.setQueryData(["status"], result);
       setDialog(null);
-      await client.invalidateQueries({ queryKey: ["logs"] });
+      await client.invalidateQueries({ queryKey: ["telemetry"] });
     },
   });
-  const canStart = status.binary_available && (saves.data?.length ?? 0) > 0;
-  const transitional =
-    status.state === "starting" || status.state === "stopping";
-  function open(kind: "start" | "stop") {
-    mutation.reset();
-    setSelected(saves.data?.[0]?.name ?? "");
-    setDialog(kind);
-  }
+  const active =
+    status.state === "running" ||
+    status.state === "paused" ||
+    status.state === "starting";
+  const canStart =
+    status.binary_available &&
+    selection.data?.save != null &&
+    status.state !== "stopping";
   return (
     <>
-      {status.state === "running" || status.state === "starting" ? (
+      {active ? (
         <button
           className="button secondary"
           onClick={() => {
-            open("stop");
+            mutation.reset();
+            setDialog("stop");
           }}
         >
           <Square size={14} />
@@ -42,17 +45,20 @@ export default function ServerControls({ status }: { status: Status }) {
       ) : (
         <button
           className="button primary"
-          disabled={!canStart || transitional}
-          onClick={() => {
-            open("start");
-          }}
+          disabled={!canStart}
           title={
             !status.binary_available
-              ? "Connect the Factorio binary to start your server."
-              : undefined
+              ? "Factorio is not configured"
+              : !selection.data?.save
+                ? "Select a save on the Saves page"
+                : undefined
           }
+          onClick={() => {
+            mutation.reset();
+            setDialog("start");
+          }}
         >
-          {transitional ? (
+          {status.state === "stopping" ? (
             <LoaderCircle size={16} className="spin" />
           ) : (
             <Play size={15} fill="currentColor" />
@@ -62,33 +68,31 @@ export default function ServerControls({ status }: { status: Status }) {
       )}
       {dialog && (
         <Modal
-          title={dialog === "start" ? "Start your factory" : "Stop the server?"}
+          title={dialog === "start" ? "Start server?" : "Stop server?"}
           close={() => {
             if (!mutation.isPending) setDialog(null);
           }}
         >
           <p className="modal-description">
-            {dialog === "start"
-              ? "Choose the world to load. The server will use your saved settings."
-              : "Connected players will be disconnected. Factorio will be asked to save and shut down gracefully."}
+            {dialog === "start" ? (
+              <>
+                Load <strong>{selection.data?.save}</strong> with the saved
+                server configuration and enabled mods. Change the startup save
+                on the{" "}
+                <a
+                  href="#saves"
+                  onClick={() => {
+                    setDialog(null);
+                  }}
+                >
+                  Saves page
+                </a>
+                .
+              </>
+            ) : (
+              "Connected players will be disconnected. Factorio will save and shut down gracefully."
+            )}
           </p>
-          {dialog === "start" && (
-            <label className="field">
-              World
-              <select
-                value={selected}
-                onChange={(event) => {
-                  setSelected(event.target.value);
-                }}
-              >
-                {saves.data?.map((save) => (
-                  <option key={save.name} value={save.name}>
-                    {save.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
           {mutation.isError && <Notice>{errorMessage(mutation.error)}</Notice>}
           <div className="modal-actions">
             <button
@@ -103,26 +107,25 @@ export default function ServerControls({ status }: { status: Status }) {
             <button
               className={`button ${dialog === "stop" ? "danger" : "primary"}`}
               disabled={
-                mutation.isPending || (dialog === "start" && selected === "")
+                mutation.isPending ||
+                (dialog === "start" && !selection.data?.save)
               }
               onClick={() => {
-                mutation.mutate(
-                  dialog === "start"
-                    ? { kind: "start", save: selected }
-                    : { kind: "stop" },
-                );
+                if (dialog === "stop") mutation.mutate({ kind: "stop" });
+                else if (selection.data?.save)
+                  mutation.mutate({ kind: "start", save: selection.data.save });
               }}
             >
-              {mutation.isPending ? (
-                <LoaderCircle size={16} className="spin" />
-              ) : (
-                <Play size={14} />
-              )}
-              {dialog === "start" ? "Start server" : "Save & stop"}
+              {mutation.isPending
+                ? "Working…"
+                : dialog === "start"
+                  ? "Start server"
+                  : "Save & stop"}
             </button>
           </div>
         </Modal>
       )}
+      {selection.isError && <Notice>{errorMessage(selection.error)}</Notice>}
     </>
   );
 }

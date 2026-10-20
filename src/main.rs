@@ -25,6 +25,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = PathBuf::from(std::env::var("FC_DATA_DIR").unwrap_or_else(|_| "./data".into()));
     let binary = std::env::var_os("FC_FACTORIO_BIN").map(PathBuf::from);
     let app = App::new(directory, binary).map_err(|e| e.message)?;
+    if let Some(binary) = &app.binary {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::process::Command::new(binary)
+                .arg("--version")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        match result {
+            Ok(Ok(output)) if output.status.success() => {
+                let output = String::from_utf8_lossy(&output.stdout);
+                let version = output
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Version: ")
+                            .and_then(|value| value.split_whitespace().next())
+                    })
+                    .filter(|value| {
+                        value.split('.').count() == 3
+                            && value.chars().all(|c| c.is_ascii_digit() || c == '.')
+                    });
+                app.inner.lock().await.status.version = version.map(str::to_owned);
+            }
+            _ => eprintln!(
+                "Unable to detect Factorio version; mod changes require a working configured binary"
+            ),
+        }
+    }
     let monitor = tokio::spawn(process::monitor(app.clone()));
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("Factorio Control listening on http://{bind}");

@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { api, ApiError, errorMessage } from "../api";
 import type { AdminsDocument } from "../api";
-import { EmptyState, Loading, Notice } from "../components/ui";
+import { EmptyState, Loading, Notice } from "./ui";
 
 function AdminsForm({ initial }: { initial: AdminsDocument }) {
   const [baseline, setBaseline] = useState(initial);
@@ -212,13 +212,24 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
     </>
   );
 }
-export default function Players() {
+export default function Administrators() {
   const query = useQuery({
     queryKey: ["admins"],
     queryFn: api.admins,
     refetchOnWindowFocus: false,
   });
-  if (query.isPending) return <Loading />;
-  if (query.isError) return <Notice>{errorMessage(query.error)}</Notice>;
-  return <AdminsForm initial={query.data} />;
+  if (query.data === undefined)
+    return query.isPending ? (
+      <Loading />
+    ) : (
+      <Notice>{errorMessage(query.error)}</Notice>
+    );
+  return (
+    <>
+      {query.isError && (
+        <Notice>{errorMessage(query.error)} Your draft is kept below.</Notice>
+      )}
+      <AdminsForm initial={query.data} />
+    </>
+  );
 }

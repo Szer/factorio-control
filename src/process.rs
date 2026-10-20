@@ -18,6 +18,9 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
         .binary
         .as_ref()
         .ok_or_else(|| Error::bad("Configure FC_FACTORIO_BIN before starting a server"))?;
+    if let Some(version) = inner.status.version.as_deref() {
+        crate::mods::validate_start(app, version)?;
+    }
     let settings = storage::settings(&app.settings_path())?;
     let auto_pause = settings.settings.auto_pause;
     storage::update_settings(&app.settings_path(), settings)?;
@@ -227,6 +230,7 @@ async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64, redac
     } else {
         level
     };
+    let original = message.clone();
     for secret in redactions {
         message = message.replace(secret, "[redacted]");
     }
@@ -254,8 +258,8 @@ async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64, redac
     }
     if inner.generation == generation
         && inner.status.state == ServerState::Starting
-        && message.contains("ServerMultiplayerManager")
-        && message.contains("to(InGame)")
+        && original.contains("ServerMultiplayerManager")
+        && original.contains("to(InGame)")
     {
         inner.status.state = if inner.telemetry.auto_paused() {
             ServerState::Paused
@@ -268,7 +272,7 @@ async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64, redac
             .activity(telemetry::ActivityKind::Started, "Server started".into());
     }
     if inner.generation == generation
-        && let Some((_, rest)) = message.split_once("Factorio ")
+        && let Some((_, rest)) = original.split_once("Factorio ")
         && let Some(version) = rest.split_whitespace().next()
         && version.chars().all(|c| c.is_ascii_digit() || c == '.')
         && version.contains('.')

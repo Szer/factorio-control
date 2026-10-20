@@ -7,6 +7,7 @@ pub enum ServerState {
     Stopped,
     Starting,
     Running,
+    Paused,
     Stopping,
     Failed,
 }
@@ -14,6 +15,7 @@ pub enum ServerState {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Status {
     pub state: ServerState,
+    pub since: u64,
     #[schema(required = true)]
     pub active_save: Option<String>,
     #[schema(required = true)]

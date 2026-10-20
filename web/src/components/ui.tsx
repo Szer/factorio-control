@@ -33,6 +33,7 @@ export function StatusBadge({ state }: { state: Status["state"] }) {
     stopped: "Stopped",
     starting: "Starting",
     running: "Running",
+    paused: "Paused",
     stopping: "Stopping",
     failed: "Needs attention",
   };

@@ -131,7 +131,10 @@ async fn process_reports_readiness_and_stops_owned_child() -> TestResult {
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
     let app = App::new(dir.path().join("data"), Some(script)).map_err(app_error)?;
     fs::write(app.saves_path().join("world.zip"), b"synthetic")?;
-    fs::write(app.settings_path(), r#"{"game_password":"InGame"}"#)?;
+    fs::write(
+        app.settings_path(),
+        r#"{"game_password":"InGame","auto_pause":false}"#,
+    )?;
     let starting = process::start(&app, "world.zip").await.map_err(app_error)?;
     assert_eq!(starting.state, ServerState::Starting);
     assert!(process::start(&app, "world.zip").await.is_err());

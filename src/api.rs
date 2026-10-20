@@ -15,6 +15,7 @@ use utoipa::OpenApi;
 #[openapi(
     paths(
         status,
+        telemetry,
         saves,
         get_settings,
         put_settings,
@@ -30,7 +31,17 @@ use utoipa::OpenApi;
         start,
         stop,
         upload,
-        download
+        download,
+        crate::mods::get_mods,
+        crate::mods::upload_mod,
+        crate::mods::download_mod,
+        crate::mods::set_enabled,
+        crate::mods::get_updates,
+        crate::mods::update_mod,
+        crate::mods::get_mod_settings,
+        crate::mods::put_mod_settings,
+        crate::mods::download_settings,
+        crate::mods::upload_settings
     ),
     components(schemas(
         Status,
@@ -56,7 +67,9 @@ pub struct Api;
 
 pub fn router(app: App, static_path: &std::path::Path) -> Router {
     let routes = Router::new()
+        .merge(crate::mods::routes())
         .route("/status", get(status))
+        .route("/telemetry", get(telemetry))
         .route("/saves", get(saves))
         .route(
             "/saves/{name}",
@@ -336,4 +349,14 @@ async fn download(State(app): State<App>, Path(name): Path<String>) -> Result<Re
         Body::from_stream(stream),
     )
         .into_response())
+}
+
+#[utoipa::path(get, path="/api/telemetry", responses((status=200, body=crate::telemetry::Snapshot), (status=400, body=ApiError)))]
+async fn telemetry(State(app): State<App>) -> Result<Json<crate::telemetry::Snapshot>> {
+    let inner = app.inner.lock().await;
+    let manager = storage::manager_settings(&app.manager_settings_path())?.settings;
+    Ok(Json(inner.telemetry.snapshot(
+        manager.enable_script_telemetry,
+        manager.poll_interval_seconds,
+    )))
 }

@@ -2,9 +2,12 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, unused_must_use)]
 
 pub mod api;
+pub mod mod_settings;
 pub mod models;
+pub mod mods;
 pub mod process;
 pub mod storage;
+pub mod telemetry;
 
 use axum::{
     Json,
@@ -82,6 +85,7 @@ pub struct Inner {
     pub child: Option<Child>,
     pub stopping_at: Option<std::time::Instant>,
     pub generation: u64,
+    pub telemetry: telemetry::Runtime,
 }
 impl App {
     pub fn new(directory: PathBuf, binary: Option<PathBuf>) -> Result<Self> {
@@ -98,6 +102,7 @@ impl App {
             inner: Arc::new(Mutex::new(Inner {
                 status: Status {
                     state: ServerState::Stopped,
+                    since: now(),
                     active_save: None,
                     started_at: None,
                     binary_available,
@@ -109,6 +114,7 @@ impl App {
                 child: None,
                 stopping_at: None,
                 generation: 0,
+                telemetry: telemetry::Runtime::default(),
             })),
         })
     }

@@ -1,10 +1,10 @@
-export type Page = "overview" | "worlds" | "players" | "settings" | "console";
+export type Page = "overview" | "saves" | "mods" | "settings" | "console";
 export function readPage(): Page {
   switch (window.location.hash) {
-    case "#worlds":
-      return "worlds";
-    case "#players":
-      return "players";
+    case "#saves":
+      return "saves";
+    case "#mods":
+      return "mods";
     case "#settings":
       return "settings";
     case "#console":

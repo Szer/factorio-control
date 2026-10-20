@@ -11,23 +11,23 @@ import {
   Settings2,
   ShieldCheck,
   Terminal,
-  Users,
+  Package,
   X,
 } from "lucide-react";
 import { api, errorMessage } from "./api";
 import { Loading, Notice, StatusBadge } from "./components/ui";
 import Overview from "./pages/Overview";
-import Worlds from "./pages/Worlds";
+import Saves from "./pages/Saves";
+import Mods from "./pages/Mods";
 import SettingsPage from "./pages/Settings";
-import Players from "./pages/Players";
 import Console from "./pages/Console";
 import { readPage } from "./routes";
 import type { Page } from "./routes";
 
 const navigation = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "worlds", label: "Worlds", icon: Box },
-  { id: "players", label: "Players", icon: Users },
+  { id: "saves", label: "Saves", icon: Box },
+  { id: "mods", label: "Mods", icon: Package },
   { id: "settings", label: "Settings", icon: Settings2 },
   { id: "console", label: "Console", icon: Terminal },
 ] satisfies { id: Page; label: string; icon: typeof Factory }[];
@@ -35,10 +35,12 @@ const navigation = [
 export default function App() {
   const [page, setPage] = useState(readPage);
   const [menuOpen, setMenuOpen] = useState(false);
+  const manager = useQuery({ queryKey: ["manager"], queryFn: api.manager });
+  const interval = (manager.data?.settings.poll_interval_seconds ?? 2) * 1000;
   const status = useQuery({
     queryKey: ["status"],
     queryFn: api.status,
-    refetchInterval: 2_000,
+    refetchInterval: interval,
   });
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
   useEffect(() => {
@@ -51,9 +53,6 @@ export default function App() {
       window.removeEventListener("hashchange", change);
     };
   }, []);
-  function navigate(next: Page) {
-    window.location.hash = next;
-  }
   const title =
     navigation.find((item) => item.id === page)?.label ?? "Overview";
   return (
@@ -193,12 +192,12 @@ export default function App() {
                     <div className="eyebrow">CONTROL ROOM</div>
                     <h1>{title}</h1>
                     <p>
-                      {page === "worlds"
+                      {page === "saves"
                         ? "Upload, select, and download saves."
                         : page === "settings"
-                          ? "Configure your Factorio server."
-                          : page === "players"
-                            ? "Manage server administrators."
+                          ? "Server configuration, administrators, and manager preferences."
+                          : page === "mods"
+                            ? "Install, update, and configure mods."
                             : "Live server output and events."}
                     </p>
                   </div>
@@ -206,16 +205,16 @@ export default function App() {
                 </div>
               )}
               {page === "overview" && (
-                <Overview status={status.data} navigate={navigate} />
+                <Overview status={status.data} interval={interval} />
               )}
-              {page === "worlds" && <Worlds status={status.data} />}
+              {page === "saves" && <Saves status={status.data} />}
               <div hidden={page !== "settings"}>
                 <SettingsPage />
               </div>
-              <div hidden={page !== "players"}>
-                <Players />
+              <div hidden={page !== "mods"}>
+                <Mods status={status.data} />
               </div>
-              {page === "console" && <Console />}
+              {page === "console" && <Console interval={interval} />}
             </>
           )}
           <footer className="page-footer">

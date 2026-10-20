@@ -1,245 +1,496 @@
-import { useState } from "react";
-import { useUnsavedChanges } from "../useUnsavedChanges";
+import { useEffect, useState } from "react";
 import type { SyntheticEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Check,
-  Globe2,
-  LoaderCircle,
-  Save,
-  Settings2,
-  Timer,
-} from "lucide-react";
-import { api, ApiError, errorMessage, settingsSchema } from "../api";
-import type { Settings, SettingsDocument } from "../api";
+  api,
+  ApiError,
+  errorMessage,
+  managerSchema,
+  rawSettingsSchema,
+} from "../api";
+import type { Settings, RawSettingsDocument, ManagerDocument } from "../api";
 import { Loading, Notice } from "../components/ui";
+import Administrators from "../components/Administrators";
+import { useUnsavedChanges } from "../useUnsavedChanges";
 
-function SettingsForm({ initial }: { initial: SettingsDocument }) {
+type Field = {
+  key: keyof Settings;
+  label: string;
+  kind:
+    | "text"
+    | "password"
+    | "number"
+    | "boolean"
+    | "textarea"
+    | "tags"
+    | "commands";
+  help?: string;
+  max?: number;
+};
+const groups: { title: string; fields: Field[] }[] = [
+  {
+    title: "Server identity",
+    fields: [
+      { key: "name", label: "Server name", kind: "text", max: 100 },
+      { key: "description", label: "Description", kind: "textarea", max: 2000 },
+      { key: "tags", label: "Tags", kind: "tags", help: "One tag per line." },
+    ],
+  },
+  {
+    title: "Access and players",
+    fields: [
+      {
+        key: "max_players",
+        label: "Player limit",
+        kind: "number",
+        max: 65535,
+        help: "0 allows unlimited players.",
+      },
+      {
+        key: "game_password",
+        label: "Game password",
+        kind: "password",
+        help: "Leave empty to allow joining without a password.",
+      },
+      {
+        key: "require_user_verification",
+        label: "Verify Factorio accounts",
+        kind: "boolean",
+      },
+      {
+        key: "ignore_player_limit_for_returning_players",
+        label: "Allow returning players past the player limit",
+        kind: "boolean",
+      },
+      {
+        key: "allow_commands",
+        label: "Lua console commands",
+        kind: "commands",
+      },
+      {
+        key: "afk_autokick_interval",
+        label: "AFK kick interval (minutes)",
+        kind: "number",
+        help: "0 disables automatic kicking.",
+      },
+    ],
+  },
+  {
+    title: "Factorio account",
+    fields: [
+      { key: "username", label: "Factorio username", kind: "text" },
+      {
+        key: "token",
+        label: "Factorio token",
+        kind: "password",
+        help: "Used for public server registration and authenticated mod downloads.",
+      },
+      {
+        key: "password",
+        label: "Factorio password",
+        kind: "password",
+        help: "Factorio supports a token instead of an account password.",
+      },
+    ],
+  },
+  {
+    title: "Saving and pausing",
+    fields: [
+      {
+        key: "autosave_interval",
+        label: "Autosave interval (minutes)",
+        kind: "number",
+        max: 1440,
+        help: "0 disables autosaves.",
+      },
+      { key: "autosave_slots", label: "Autosave slots", kind: "number" },
+      {
+        key: "autosave_only_on_server",
+        label: "Autosave only on the server",
+        kind: "boolean",
+      },
+      {
+        key: "non_blocking_saving",
+        label: "Non-blocking saves",
+        kind: "boolean",
+        help: "Factorio's background saving support on Linux.",
+      },
+      {
+        key: "auto_pause",
+        label: "Pause when the server is empty",
+        kind: "boolean",
+      },
+      {
+        key: "auto_pause_when_players_connect",
+        label: "Pause while players connect",
+        kind: "boolean",
+      },
+      {
+        key: "only_admins_can_pause_the_game",
+        label: "Only administrators can pause",
+        kind: "boolean",
+      },
+    ],
+  },
+  {
+    title: "Network",
+    fields: [
+      {
+        key: "max_upload_in_kilobytes_per_second",
+        label: "Upload limit (KB/s)",
+        kind: "number",
+        help: "0 means unlimited.",
+      },
+      {
+        key: "max_upload_slots",
+        label: "Concurrent upload slots",
+        kind: "number",
+        help: "0 means unlimited.",
+      },
+      {
+        key: "minimum_latency_in_ticks",
+        label: "Minimum latency (ticks)",
+        kind: "number",
+      },
+      {
+        key: "max_heartbeats_per_second",
+        label: "Maximum heartbeats per second",
+        kind: "number",
+      },
+      {
+        key: "minimum_segment_size",
+        label: "Minimum segment size",
+        kind: "number",
+      },
+      {
+        key: "minimum_segment_size_peer_count",
+        label: "Minimum segment size peer count",
+        kind: "number",
+      },
+      {
+        key: "maximum_segment_size",
+        label: "Maximum segment size",
+        kind: "number",
+      },
+      {
+        key: "maximum_segment_size_peer_count",
+        label: "Maximum segment size peer count",
+        kind: "number",
+      },
+    ],
+  },
+];
+function parseRaw(text: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(text);
+  return rawSettingsSchema.shape.settings.parse(parsed);
+}
+function SaveBar({
+  dirty,
+  busy,
+  discard,
+  label = "Save changes",
+}: {
+  dirty: boolean;
+  busy: boolean;
+  discard: () => void;
+  label?: string;
+}) {
+  return (
+    <div className="save-bar">
+      <span>{dirty ? "You have unsaved changes" : "All changes saved"}</span>
+      <div>
+        <button
+          type="button"
+          className="button secondary"
+          disabled={!dirty || busy}
+          onClick={discard}
+        >
+          Discard
+        </button>
+        <button className="button primary" disabled={!dirty || busy}>
+          {busy ? "Saving…" : label}
+        </button>
+      </div>
+    </div>
+  );
+}
+function ServerForm({ initial }: { initial: RawSettingsDocument }) {
   const [baseline, setBaseline] = useState(initial);
-  const [draft, setDraft] = useState(initial.settings);
+  const [text, setText] = useState(JSON.stringify(initial.settings, null, 2));
+  const [mode, setMode] = useState<"form" | "raw">("form");
   const [validation, setValidation] = useState<string | null>(null);
   const client = useQueryClient();
-  const mutation = useMutation({
-    mutationFn: api.saveSettings,
-    onSuccess: (result) => {
-      setBaseline(result);
-      setDraft(result.settings);
-      client.setQueryData(["settings"], result);
-    },
+  const dirty = text !== JSON.stringify(baseline.settings, null, 2);
+  useUnsavedChanges(dirty);
+  function receive(result: RawSettingsDocument) {
+    setBaseline(result);
+    setText(JSON.stringify(result.settings, null, 2));
+    client.setQueryData(["raw-settings"], result);
+    client.invalidateQueries({ queryKey: ["settings"] }).catch(() => undefined);
+  }
+  const save = useMutation({
+    mutationFn: api.saveRawSettings,
+    onSuccess: receive,
   });
   const reload = useMutation({
-    mutationFn: api.settings,
+    mutationFn: api.rawSettings,
     onSuccess: (result) => {
-      setBaseline(result);
-      setDraft(result.settings);
-      mutation.reset();
+      receive(result);
+      save.reset();
       setValidation(null);
-      client.setQueryData(["settings"], result);
     },
   });
-  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline.settings);
-  useUnsavedChanges(dirty);
-  function update<K extends keyof Settings>(key: K, value: Settings[K]) {
-    setDraft((previous) => ({ ...previous, [key]: value }));
-    mutation.reset();
+  const busy = save.isPending || reload.isPending;
+  let draft: Record<string, unknown> = {};
+  let parseError = false;
+  try {
+    draft = parseRaw(text);
+  } catch {
+    parseError = true;
+  }
+  function setField(key: string, value: unknown) {
+    setText(JSON.stringify({ ...draft, [key]: value }, null, 2));
+    save.reset();
+    setValidation(null);
   }
   function submit(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
     setValidation(null);
-    const parsed = settingsSchema.safeParse(draft);
-    if (!parsed.success) {
-      setValidation(
-        parsed.error.issues[0]?.message ?? "Check the highlighted settings.",
-      );
-      return;
+    try {
+      save.mutate({ revision: baseline.revision, settings: parseRaw(text) });
+    } catch {
+      setValidation("Enter a valid JSON object. Your draft has been kept.");
     }
-    mutation.mutate({ revision: baseline.revision, settings: parsed.data });
   }
-  const conflict =
-    mutation.error instanceof ApiError && mutation.error.status === 409;
+  const visibility = rawSettingsSchema.shape.settings.safeParse(
+    draft.visibility,
+  );
   return (
-    <form onSubmit={submit} className="settings-form">
-      <div className="settings-grid">
+    <form onSubmit={submit}>
+      <div className="toolbar">
+        <div className="tab-buttons" aria-label="Settings editor">
+          <button
+            type="button"
+            className={mode === "form" ? "button primary" : "button secondary"}
+            disabled={busy || parseError}
+            onClick={() => {
+              setMode("form");
+            }}
+          >
+            Form
+          </button>
+          <button
+            type="button"
+            className={mode === "raw" ? "button primary" : "button secondary"}
+            disabled={busy}
+            onClick={() => {
+              setMode("raw");
+            }}
+          >
+            Raw JSON
+          </button>
+        </div>
+        <span className="muted">Applied on the next server start</span>
+      </div>
+      {mode === "raw" ? (
+        <section className="panel">
+          <div className="section-heading">
+            <div>
+              <h2>server-settings.json</h2>
+              <p>
+                All fields are editable. Unknown keys are preserved when
+                switching back to the form. This file can contain credentials.
+              </p>
+            </div>
+          </div>
+          <div className="form-fields">
+            <label className="field">
+              Raw server settings
+              <textarea
+                className="raw-editor"
+                spellCheck={false}
+                autoComplete="off"
+                rows={24}
+                value={text}
+                disabled={busy}
+                onChange={(event) => {
+                  setText(event.target.value);
+                  save.reset();
+                }}
+              />
+            </label>
+          </div>
+        </section>
+      ) : (
         <div className="settings-sections">
+          {parseError && (
+            <Notice>
+              Invalid JSON. Open Raw JSON to correct the document.
+            </Notice>
+          )}
+          {groups.map((group) => (
+            <section className="panel form-panel" key={group.title}>
+              <div className="section-heading">
+                <h2>{group.title}</h2>
+              </div>
+              <div className="form-fields settings-fields">
+                {group.fields.map((field) => {
+                  const value = draft[field.key];
+                  if (field.kind === "boolean")
+                    return (
+                      <label key={field.key} className="toggle-row">
+                        <span>
+                          <strong>{field.label}</strong>
+                          {field.help && <small>{field.help}</small>}
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={value === true}
+                          disabled={busy || parseError}
+                          onChange={(event) => {
+                            setField(field.key, event.target.checked);
+                          }}
+                        />
+                      </label>
+                    );
+                  return (
+                    <label
+                      className={`field ${field.kind === "textarea" || field.kind === "tags" ? "wide-field" : ""}`}
+                      key={field.key}
+                    >
+                      {field.label}
+                      {field.kind === "commands" ? (
+                        <select
+                          value={String(value)}
+                          disabled={busy || parseError}
+                          onChange={(event) => {
+                            setField(
+                              field.key,
+                              event.target.value === "admins-only"
+                                ? "admins-only"
+                                : event.target.value === "true",
+                            );
+                          }}
+                        >
+                          <option value="admins-only">
+                            Administrators only
+                          </option>
+                          <option value="true">Everyone</option>
+                          <option value="false">Disabled</option>
+                        </select>
+                      ) : field.kind === "textarea" || field.kind === "tags" ? (
+                        <textarea
+                          rows={field.kind === "tags" ? 2 : 3}
+                          maxLength={field.max}
+                          value={
+                            field.kind === "tags"
+                              ? Array.isArray(value)
+                                ? value
+                                    .filter(
+                                      (item): item is string =>
+                                        typeof item === "string",
+                                    )
+                                    .join("\n")
+                                : ""
+                              : typeof value === "string"
+                                ? value
+                                : ""
+                          }
+                          disabled={busy || parseError}
+                          onChange={(event) => {
+                            setField(
+                              field.key,
+                              field.kind === "tags"
+                                ? event.target.value.split("\n")
+                                : event.target.value,
+                            );
+                          }}
+                        />
+                      ) : (
+                        <input
+                          type={field.kind}
+                          value={
+                            typeof value === "string" ||
+                            typeof value === "number"
+                              ? value
+                              : ""
+                          }
+                          disabled={busy || parseError}
+                          autoComplete={
+                            field.kind === "password" ? "new-password" : "off"
+                          }
+                          min={field.kind === "number" ? 0 : undefined}
+                          max={field.kind === "number" ? field.max : undefined}
+                          step={field.kind === "number" ? 1 : undefined}
+                          maxLength={
+                            field.kind === "text" ? field.max : undefined
+                          }
+                          required={
+                            field.kind === "number" || field.key === "name"
+                          }
+                          onChange={(event) => {
+                            setField(
+                              field.key,
+                              field.kind === "number"
+                                ? event.target.value === ""
+                                  ? ""
+                                  : event.target.valueAsNumber
+                                : event.target.value,
+                            );
+                          }}
+                        />
+                      )}
+                      {field.help && <small>{field.help}</small>}
+                    </label>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
           <section className="panel form-panel">
             <div className="section-heading">
-              <div className="section-title-icon">
-                <Settings2 size={19} />
-                <div>
-                  <h2>Server identity</h2>
-                  <p>A familiar name for your corner of the universe.</p>
-                </div>
-              </div>
+              <h2>Server visibility</h2>
             </div>
             <div className="form-fields">
-              <label className="field">
-                Server name
-                <input
-                  disabled={mutation.isPending || reload.isPending}
-                  required
-                  maxLength={100}
-                  value={draft.name}
-                  onChange={(event) => {
-                    update("name", event.target.value);
-                  }}
-                />
-                <small>Shown to players in the server browser.</small>
-              </label>
-              <label className="field">
-                Description
-                <textarea
-                  disabled={mutation.isPending || reload.isPending}
-                  rows={3}
-                  maxLength={2000}
-                  placeholder="What are we building?"
-                  value={draft.description}
-                  onChange={(event) => {
-                    update("description", event.target.value);
-                  }}
-                />
-              </label>
-            </div>
-          </section>
-          <section className="panel form-panel">
-            <div className="section-heading">
-              <div className="section-title-icon">
-                <Globe2 size={19} />
-                <div>
-                  <h2>Joining your world</h2>
-                  <p>Choose who can find your server.</p>
-                </div>
-              </div>
-            </div>
-            <div className="form-fields">
-              <label className="field compact-field">
-                Player limit
-                <input
-                  disabled={mutation.isPending || reload.isPending}
-                  type="number"
-                  min={0}
-                  max={65535}
-                  required
-                  value={draft.max_players}
-                  onChange={(event) => {
-                    update("max_players", event.target.valueAsNumber);
-                  }}
-                />
-                <small>Use 0 for unlimited players.</small>
-              </label>
-              <label className="toggle-row">
-                <span>
-                  <strong>Visible on your local network</strong>
-                  <small>Let nearby players find this server on LAN.</small>
-                </span>
-                <input
-                  disabled={mutation.isPending || reload.isPending}
-                  type="checkbox"
-                  role="switch"
-                  checked={draft.visibility.lan}
-                  onChange={(event) => {
-                    update("visibility", {
-                      ...draft.visibility,
-                      lan: event.target.checked,
-                    });
-                  }}
-                />
-              </label>
-              <label className="toggle-row">
-                <span>
-                  <strong>Listed in the public server browser</strong>
-                  <small>
-                    Requires Factorio credentials in your server configuration.
-                  </small>
-                </span>
-                <input
-                  disabled={mutation.isPending || reload.isPending}
-                  type="checkbox"
-                  role="switch"
-                  checked={draft.visibility.public}
-                  onChange={(event) => {
-                    update("visibility", {
-                      ...draft.visibility,
-                      public: event.target.checked,
-                    });
-                  }}
-                />
-              </label>
-            </div>
-          </section>
-          <section className="panel form-panel">
-            <div className="section-heading">
-              <div className="section-title-icon">
-                <Timer size={19} />
-                <div>
-                  <h2>Keep things ticking</h2>
-                  <p>Small settings for a smoother session.</p>
-                </div>
-              </div>
-            </div>
-            <div className="form-fields">
-              <label className="field compact-field">
-                Autosave interval (minutes)
-                <input
-                  disabled={mutation.isPending || reload.isPending}
-                  type="number"
-                  min={0}
-                  max={1440}
-                  required
-                  value={draft.autosave_interval}
-                  onChange={(event) => {
-                    update("autosave_interval", event.target.valueAsNumber);
-                  }}
-                />
-                <small>Use 0 to disable automatic saves.</small>
-              </label>
-              <label className="toggle-row">
-                <span>
-                  <strong>Pause when the server is empty</strong>
-                  <small>Your factory waits until someone comes back.</small>
-                </span>
-                <input
-                  disabled={mutation.isPending || reload.isPending}
-                  type="checkbox"
-                  role="switch"
-                  checked={draft.auto_pause}
-                  onChange={(event) => {
-                    update("auto_pause", event.target.checked);
-                  }}
-                />
-              </label>
+              {(
+                [
+                  ["lan", "Visible on your local network"],
+                  ["public", "Listed in the public server browser"],
+                ] as const
+              ).map(([key, label]) => (
+                <label className="toggle-row" key={key}>
+                  <strong>{label}</strong>
+                  <input
+                    type="checkbox"
+                    checked={
+                      visibility.success && visibility.data[key] === true
+                    }
+                    disabled={busy || parseError}
+                    onChange={(event) => {
+                      setField("visibility", {
+                        ...(visibility.success ? visibility.data : {}),
+                        [key]: event.target.checked,
+                      });
+                    }}
+                  />
+                </label>
+              ))}
             </div>
           </section>
         </div>
-        <aside className="settings-aside">
-          <span className="aside-icon">
-            <Check size={20} />
-          </span>
-          <h3>Saved means saved.</h3>
-          <p>Changes are confirmed only after they’re written to disk.</p>
-          <p>Restart the Factorio server to apply updated settings.</p>
-          <div className="aside-divider" />
-          <span className="small-label">ADMINISTRATORS</span>
-          <p>
-            Manage trusted Factorio players from the{" "}
-            <a href="#players">
-              Players page <span aria-hidden="true">↗</span>
-            </a>
-            .
-          </p>
-        </aside>
-      </div>
+      )}
       {validation && <Notice>{validation}</Notice>}
-      {mutation.isError && (
+      {save.isError && (
         <Notice>
-          {errorMessage(mutation.error)}
-          {conflict && (
+          {errorMessage(save.error)}
+          {save.error instanceof ApiError && save.error.status === 409 && (
             <button
               type="button"
               className="text-button"
+              disabled={busy}
               onClick={() => {
                 reload.mutate();
               }}
-              disabled={reload.isPending}
             >
               Discard edits & reload
             </button>
@@ -247,52 +498,252 @@ function SettingsForm({ initial }: { initial: SettingsDocument }) {
         </Notice>
       )}
       {reload.isError && <Notice>{errorMessage(reload.error)}</Notice>}
-      {mutation.isSuccess && !dirty && (
+      {save.isSuccess && !dirty && (
         <Notice success>
           Settings saved. Restart the server to apply them.
         </Notice>
       )}
-      <div className="save-bar">
-        <span>
-          <span className={`tiny-dot ${dirty ? "amber" : ""}`} />
-          {dirty ? "You have unsaved changes" : "All changes saved"}
-        </span>
-        <div>
-          <button
-            type="button"
-            className="button secondary"
-            disabled={!dirty || mutation.isPending}
-            onClick={() => {
-              setDraft(baseline.settings);
-              mutation.reset();
-              setValidation(null);
-            }}
-          >
-            Discard
-          </button>
-          <button
-            className="button primary"
-            disabled={!dirty || mutation.isPending}
-          >
-            {mutation.isPending ? (
-              <LoaderCircle size={16} className="spin" />
-            ) : (
-              <Save size={16} />
-            )}
-            {mutation.isPending ? "Saving…" : "Save changes"}
-          </button>
-        </div>
-      </div>
+      <SaveBar
+        dirty={dirty}
+        busy={busy}
+        discard={() => {
+          setText(JSON.stringify(baseline.settings, null, 2));
+          save.reset();
+          setValidation(null);
+        }}
+      />
     </form>
   );
 }
-export default function SettingsPage() {
+function ServerSettings() {
   const query = useQuery({
-    queryKey: ["settings"],
-    queryFn: api.settings,
-    refetchOnWindowFocus: false,
+    queryKey: ["raw-settings"],
+    queryFn: api.rawSettings,
   });
-  if (query.isPending) return <Loading />;
-  if (query.isError) return <Notice>{errorMessage(query.error)}</Notice>;
-  return <SettingsForm initial={query.data} />;
+  if (query.data === undefined)
+    return query.isPending ? (
+      <Loading />
+    ) : (
+      <Notice>{errorMessage(query.error)}</Notice>
+    );
+  return (
+    <>
+      {query.isError && (
+        <Notice>{errorMessage(query.error)} Your draft is kept below.</Notice>
+      )}
+      <ServerForm initial={query.data} />
+    </>
+  );
+}
+function ManagerForm({ initial }: { initial: ManagerDocument }) {
+  const [baseline, setBaseline] = useState(initial);
+  const [draft, setDraft] = useState(initial.settings);
+  const [validation, setValidation] = useState<string | null>(null);
+  const client = useQueryClient();
+  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline.settings);
+  useUnsavedChanges(dirty);
+  function receive(result: ManagerDocument) {
+    setBaseline(result);
+    setDraft(result.settings);
+    client.setQueryData(["manager"], result);
+  }
+  const save = useMutation({ mutationFn: api.saveManager, onSuccess: receive });
+  const reload = useMutation({
+    mutationFn: api.manager,
+    onSuccess: (result) => {
+      receive(result);
+      save.reset();
+      setValidation(null);
+    },
+  });
+  const busy = save.isPending || reload.isPending;
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        const parsed = managerSchema.safeParse({
+          revision: baseline.revision,
+          settings: draft,
+        });
+        if (!parsed.success) {
+          setValidation(
+            parsed.error.issues[0]?.message ?? "Check the settings.",
+          );
+          return;
+        }
+        setValidation(null);
+        save.mutate(parsed.data);
+      }}
+    >
+      <section className="panel form-panel">
+        <div className="section-heading">
+          <div>
+            <h2>Manager settings</h2>
+            <p>Controls this interface and its live monitoring.</p>
+          </div>
+        </div>
+        <div className="form-fields">
+          <label className="field compact-field">
+            Refresh interval (seconds)
+            <input
+              type="number"
+              min={1}
+              max={60}
+              required
+              disabled={busy}
+              value={draft.poll_interval_seconds}
+              onChange={(event) => {
+                setDraft({
+                  ...draft,
+                  poll_interval_seconds: event.target.valueAsNumber,
+                });
+                save.reset();
+              }}
+            />
+            <small>UI refresh and server sampling interval.</small>
+          </label>
+          <label className="field compact-field">
+            UPS history (minutes)
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              required
+              disabled={busy}
+              value={draft.ups_history_minutes}
+              onChange={(event) => {
+                setDraft({
+                  ...draft,
+                  ups_history_minutes: event.target.valueAsNumber,
+                });
+                save.reset();
+              }}
+            />
+            <small>History is kept in memory while the manager runs.</small>
+          </label>
+          <label className="toggle-row">
+            <span>
+              <strong>Enable scripting telemetry</strong>
+              <small>
+                Read live UPS, pause state, players, research, and completed
+                research through Factorio's scripting console.
+              </small>
+            </span>
+            <input
+              type="checkbox"
+              checked={draft.enable_script_telemetry}
+              disabled={busy}
+              onChange={(event) => {
+                setDraft({
+                  ...draft,
+                  enable_script_telemetry: event.target.checked,
+                });
+                save.reset();
+              }}
+            />
+          </label>
+          <div className="notice">
+            <span>
+              Enabling scripting telemetry disables achievements for the loaded
+              save. Turning it off later does not restore achievements. Enable
+              it only for saves where you accept this.
+            </span>
+          </div>
+        </div>
+      </section>
+      {validation && <Notice>{validation}</Notice>}
+      {save.isError && (
+        <Notice>
+          {errorMessage(save.error)}
+          {save.error instanceof ApiError && save.error.status === 409 && (
+            <button
+              className="text-button"
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                reload.mutate();
+              }}
+            >
+              Discard edits & reload
+            </button>
+          )}
+        </Notice>
+      )}
+      {reload.isError && <Notice>{errorMessage(reload.error)}</Notice>}
+      {save.isSuccess && !dirty && (
+        <Notice success>Manager settings saved.</Notice>
+      )}
+      <SaveBar
+        dirty={dirty}
+        busy={busy}
+        discard={() => {
+          setDraft(baseline.settings);
+          save.reset();
+          setValidation(null);
+        }}
+      />
+    </form>
+  );
+}
+function ManagerSettings() {
+  const query = useQuery({ queryKey: ["manager"], queryFn: api.manager });
+  if (query.data === undefined)
+    return query.isPending ? (
+      <Loading />
+    ) : (
+      <Notice>{errorMessage(query.error)}</Notice>
+    );
+  return (
+    <>
+      {query.isError && (
+        <Notice>{errorMessage(query.error)} Your draft is kept below.</Notice>
+      )}
+      <ManagerForm initial={query.data} />
+    </>
+  );
+}
+export default function SettingsPage() {
+  const [tab, setTab] = useState<"server" | "manager" | "admins">("server");
+  useEffect(() => {
+    const show = () => {
+      setTab("manager");
+    };
+    window.addEventListener("open-manager-settings", show);
+    return () => {
+      window.removeEventListener("open-manager-settings", show);
+    };
+  }, []);
+  return (
+    <>
+      <div className="tab-buttons settings-tabs" aria-label="Settings section">
+        {(
+          [
+            ["server", "Server settings"],
+            ["admins", "Administrators"],
+            ["manager", "Manager settings"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            className={tab === id ? "button primary" : "button secondary"}
+            aria-pressed={tab === id}
+            onClick={() => {
+              setTab(id);
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div hidden={tab !== "server"}>
+        <ServerSettings />
+      </div>
+      <div hidden={tab !== "admins"}>
+        <Administrators />
+      </div>
+      <div hidden={tab !== "manager"}>
+        <ManagerSettings />
+      </div>
+    </>
+  );
 }
