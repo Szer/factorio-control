@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { QueryKey, UseMutationOptions } from "@tanstack/react-query";
-import { authKey } from "./authApi";
+import { authKey, captureAuthEpoch } from "./authApi";
 import type { SessionStatus } from "./authApi";
 
 export interface SessionMutationContext {
@@ -28,10 +28,12 @@ export function useSessionMutation<TData, TVariables>(
   return useMutation<TData, Error, TVariables, SessionMutationContext>({
     ...rest,
     onMutate: () => {
+      const epoch = captureAuthEpoch();
       const session = client.getQueryData<SessionStatus>(authKey);
       if (!session?.user || session.user.must_change_password)
         throw new Error("Sign in again before changing server data.");
       const matches = () =>
+        captureAuthEpoch() === epoch &&
         client.getQueryData(authKey) === session &&
         (session.expires_at === null || session.expires_at * 1000 > Date.now());
       const commit: SessionMutationContext["commit"] = (effect) => {

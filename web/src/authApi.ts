@@ -42,8 +42,41 @@ export function useAccess() {
   };
 }
 
-export function authExpired() {
+// Session transitions isolate side effects from older in-flight requests.
+let authEpoch = 0;
+let knownSession: string | null | undefined;
+
+export function captureAuthEpoch(): number {
+  return authEpoch;
+}
+export function advanceAuthEpoch(): number {
+  authEpoch += 1;
+  return authEpoch;
+}
+function signature(session: SessionStatus): string | null {
+  return session.user
+    ? JSON.stringify([
+        session.user.account_id,
+        session.user.username,
+        session.user.role,
+        session.user.must_change_password,
+        session.expires_at,
+      ])
+    : null;
+}
+export function authExpired(expected = captureAuthEpoch()): boolean {
+  if (expected !== captureAuthEpoch()) return false;
+  advanceAuthEpoch();
+  knownSession = null;
   window.dispatchEvent(new Event(authEvent));
+  return true;
+}
+export function authDiscard(expected = captureAuthEpoch()): boolean {
+  if (expected !== captureAuthEpoch()) return false;
+  advanceAuthEpoch();
+  knownSession = null;
+  window.dispatchEvent(new Event(authDiscardEvent));
+  return true;
 }
 
 async function request<T>(
@@ -52,6 +85,7 @@ async function request<T>(
   input?: unknown,
   notify = true,
 ): Promise<T> {
+  const epoch = captureAuthEpoch();
   const response = await fetch(`/api/auth/${path}`, {
     method: input === undefined ? "GET" : "POST",
     credentials: "same-origin",
@@ -64,7 +98,7 @@ async function request<T>(
         }),
   });
   if (!response.ok) {
-    if (response.status === 401 && notify) authExpired();
+    if (response.status === 401 && notify) authExpired(epoch);
     const body: unknown = await response.json().catch(() => null);
     const parsed = z.object({ message: z.string() }).safeParse(body);
     throw new Error(
@@ -84,9 +118,30 @@ async function request<T>(
 }
 
 export const authApi = {
-  status: () => request("status", sessionSchema),
-  login: (username: string, password: string) =>
-    request("login", sessionSchema, { username, password }, false),
+  status: async () => {
+    const epoch = captureAuthEpoch();
+    const session = await request("status", sessionSchema);
+    if (epoch !== captureAuthEpoch())
+      throw new Error(
+        "The session changed while checking authentication. Retry the request.",
+      );
+    const next = signature(session);
+    if (knownSession !== next) advanceAuthEpoch();
+    knownSession = next;
+    return session;
+  },
+  login: async (username: string, password: string) => {
+    const session = await request(
+      "login",
+      sessionSchema,
+      { username, password },
+      false,
+    );
+    if (!session.user) throw new Error("Sign-in was not confirmed. Try again.");
+    advanceAuthEpoch();
+    knownSession = signature(session);
+    return session;
+  },
   logout: () => request("logout", z.undefined(), {}),
   password: (current_password: string, password: string) =>
     request("password", z.undefined(), { current_password, password }),

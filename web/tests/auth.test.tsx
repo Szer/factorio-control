@@ -65,6 +65,7 @@ function mountGate(queryClient = client()) {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 it("does not mount the app before session status is known", async () => {
@@ -163,8 +164,17 @@ it("hides cached protected data after unauthorized API responses", async () => {
   const queryClient = mountGate();
   expect(await screen.findByText("Protected admin")).toBeTruthy();
   queryClient.setQueryData(["settings"], { token: "synthetic-test-value" });
-  act(() => {
-    authExpired();
+  const { api } = await import("../src/api");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ message: "Session expired" }), {
+        status: 401,
+      }),
+    ),
+  );
+  await act(async () => {
+    await api.status().catch(() => undefined);
   });
   expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
   expect(queryClient.getQueryData(["settings"])).toEqual({
@@ -505,6 +515,198 @@ it("does not let delayed sign-out cleanup clear a newly authenticated identity",
   );
   expect(queryClient.getQueryData(["new-account-cache"])).toBe(
     "new-account-data",
+  );
+  expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+});
+
+it.each(["owner", "another"])(
+  "ignores an old real API 401 after %s signs in",
+  async (username) => {
+    const { api } = await import("../src/api");
+    vi.spyOn(authApi, "status").mockResolvedValue(administrator);
+    let finish: ((response: Response) => void) | undefined;
+    const renewed = {
+      ...administrator,
+      user: {
+        username,
+        account_id: username === "owner" ? "fixture-owner" : "new-account",
+        role: "admin",
+        must_change_password: false,
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((path: string) =>
+        path === "/api/auth/login"
+          ? Promise.resolve(
+              new Response(JSON.stringify(renewed), { status: 200 }),
+            )
+          : new Promise<Response>((resolve) => {
+              finish = resolve;
+            }),
+      ),
+    );
+    const queryClient = mountGate();
+    await screen.findByText("Protected admin");
+    const old = api.status().catch((error: unknown) => error);
+    act(() => {
+      authExpired();
+    });
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("Account name"), username);
+    await user.type(screen.getByLabelText("Password"), "synthetic-password");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText("Protected admin");
+    await act(async () => {
+      finish?.(
+        new Response(JSON.stringify({ message: "Old session expired" }), {
+          status: 401,
+        }),
+      );
+      await old;
+    });
+    expect(
+      queryClient.getQueryData<SessionStatus>(authKey)?.user?.username,
+    ).toBe(username);
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+  },
+);
+
+it("ignores a delayed password-change acknowledgement after another account signs in", async () => {
+  vi.spyOn(authApi, "status").mockResolvedValue(administrator);
+  let finish: (() => void) | undefined;
+  vi.spyOn(authApi, "password").mockReturnValue(
+    new Promise<undefined>((resolve) => {
+      finish = () => {
+        resolve(undefined);
+      };
+    }),
+  );
+  const next = {
+    ...administrator,
+    user: {
+      username: "another",
+      account_id: "new-account",
+      role: "admin",
+      must_change_password: false,
+    },
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify(next), { status: 200 })),
+      ),
+  );
+  const queryClient = mountGate();
+  await screen.findByText("Protected admin");
+  const user = userEvent.setup();
+  await user.click(screen.getByText("owner"));
+  await user.type(
+    screen.getByLabelText("Current password"),
+    "synthetic-old-password",
+  );
+  await user.type(
+    screen.getByLabelText("New password"),
+    "synthetic-new-password",
+  );
+  await user.click(screen.getByRole("button", { name: "Change password" }));
+  act(() => {
+    authExpired();
+  });
+  await user.type(await screen.findByLabelText("Account name"), "another");
+  await user.type(screen.getByLabelText("Password"), "synthetic-password");
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+  await screen.findByText("another");
+  await act(async () => {
+    finish?.();
+    await Promise.resolve();
+  });
+  expect(queryClient.getQueryData<SessionStatus>(authKey)?.user?.username).toBe(
+    "another",
+  );
+  expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+});
+
+it("does not reopen protected content when an old status poll returns 200 after expiry", async () => {
+  let finish: ((response: Response) => void) | undefined;
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(administrator), { status: 200 }),
+    )
+    .mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+  vi.stubGlobal("fetch", fetch);
+  const queryClient = mountGate();
+  await screen.findByText("Protected admin");
+  const oldPoll = queryClient.refetchQueries({ queryKey: authKey });
+  await waitFor(() => {
+    expect(finish).toBeTypeOf("function");
+  });
+  act(() => {
+    authExpired();
+  });
+  await screen.findByRole("button", { name: "Sign in" });
+  await act(async () => {
+    finish?.(new Response(JSON.stringify(administrator), { status: 200 }));
+    await oldPoll;
+  });
+  expect(queryClient.getQueryData<SessionStatus>(authKey)?.user).toBeNull();
+  expect(screen.queryByRole("textbox", { name: "Secret draft" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+});
+
+it("ignores a delayed logout acknowledgement after another account signs in", async () => {
+  vi.spyOn(authApi, "status").mockResolvedValue(administrator);
+  let finish: (() => void) | undefined;
+  vi.spyOn(authApi, "logout").mockReturnValue(
+    new Promise<undefined>((resolve) => {
+      finish = () => {
+        resolve(undefined);
+      };
+    }),
+  );
+  const next = {
+    ...administrator,
+    user: {
+      username: "another",
+      account_id: "new-account",
+      role: "admin",
+      must_change_password: false,
+    },
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify(next), { status: 200 })),
+      ),
+  );
+  const queryClient = mountGate();
+  await screen.findByText("Protected admin");
+  const user = userEvent.setup();
+  await user.click(screen.getByText("owner"));
+  await user.click(screen.getByRole("button", { name: "Sign out" }));
+  act(() => {
+    authExpired();
+  });
+  await user.type(await screen.findByLabelText("Account name"), "another");
+  await user.type(screen.getByLabelText("Password"), "synthetic-password");
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+  await screen.findByText("another");
+  await act(async () => {
+    finish?.();
+    await Promise.resolve();
+  });
+  expect(queryClient.getQueryData<SessionStatus>(authKey)?.user?.username).toBe(
+    "another",
   );
   expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
 });

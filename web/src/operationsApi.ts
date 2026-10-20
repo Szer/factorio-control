@@ -1,4 +1,4 @@
-import { authExpired } from "./authApi";
+import { authExpired, captureAuthEpoch } from "./authApi";
 import { z } from "zod";
 import type { components } from "./api.generated";
 import { ApiError, saveSchema, statusSchema } from "./api";
@@ -21,6 +21,7 @@ async function request<T>(
   schema: z.ZodType<T>,
   body?: unknown,
 ): Promise<T> {
+  const epoch = captureAuthEpoch();
   const response = await fetch(
     url,
     body === undefined
@@ -33,7 +34,7 @@ async function request<T>(
   );
   const value: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    if (response.status === 401) authExpired();
+    if (response.status === 401) authExpired(epoch);
     const problem = z.object({ message: z.string() }).safeParse(value);
     throw new ApiError(
       problem.success ? problem.data.message : "Operation failed",
