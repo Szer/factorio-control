@@ -36,6 +36,7 @@ use utoipa::OpenApi;
         download,
         crate::mods::save_sync::plan,
         crate::mods::save_sync::apply,
+        crate::mods::save_sync::progress,
         crate::mods::get_mods,
         crate::mods::upload_mod,
         crate::mods::download_mod,

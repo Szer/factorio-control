@@ -76,6 +76,7 @@ impl IntoResponse for Error {
 #[derive(Clone)]
 pub struct App {
     pub inner: Arc<Mutex<Inner>>,
+    pub sync_progress: Arc<std::sync::Mutex<Option<mods::save_sync::SyncProgress>>>,
     pub directory: PathBuf,
     pub binary: Option<PathBuf>,
 }
@@ -100,6 +101,7 @@ impl App {
         Ok(Self {
             directory,
             binary,
+            sync_progress: Arc::new(std::sync::Mutex::new(None)),
             inner: Arc::new(Mutex::new(Inner {
                 status: Status {
                     state: ServerState::Stopped,

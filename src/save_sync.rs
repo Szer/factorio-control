@@ -30,6 +30,158 @@ pub struct SyncPlan {
 #[serde(deny_unknown_fields)]
 pub struct SyncRequest {
     pub revision: String,
+    #[serde(default)]
+    pub operation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncPhase {
+    Preparing,
+    Resolving,
+    Downloading,
+    Validating,
+    Applying,
+    Complete,
+    Failed,
+}
+
+impl SyncPhase {
+    fn active(&self) -> bool {
+        !matches!(self, Self::Complete | Self::Failed)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct SyncProgress {
+    pub operation_id: String,
+    pub save: String,
+    pub phase: SyncPhase,
+    pub completed: usize,
+    pub total: usize,
+    pub current_mod: Option<String>,
+    pub error: Option<String>,
+}
+
+struct ProgressGuard {
+    state: std::sync::Arc<std::sync::Mutex<Option<SyncProgress>>>,
+    operation_id: String,
+    finished: bool,
+}
+
+impl ProgressGuard {
+    fn start(app: &App, save: &str, operation_id: Option<String>) -> Result<Self> {
+        static NEXT_OPERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let operation_id = operation_id.unwrap_or_else(|| {
+            format!(
+                "sync-{}-{}",
+                crate::now(),
+                NEXT_OPERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
+        });
+        if operation_id.is_empty()
+            || operation_id.len() > 64
+            || !operation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(Error::bad("Invalid sync operation ID"));
+        }
+        let mut state = app
+            .sync_progress
+            .lock()
+            .map_err(|_| Error::bad("Sync progress is unavailable"))?;
+        if state
+            .as_ref()
+            .is_some_and(|progress| progress.phase.active())
+        {
+            return Err(Error::conflict(
+                "Another save mod sync is already in progress",
+            ));
+        }
+        *state = Some(SyncProgress {
+            operation_id: operation_id.clone(),
+            save: save.into(),
+            phase: SyncPhase::Preparing,
+            completed: 0,
+            total: 0,
+            current_mod: None,
+            error: None,
+        });
+        Ok(Self {
+            state: app.sync_progress.clone(),
+            operation_id,
+            finished: false,
+        })
+    }
+
+    fn update(
+        &self,
+        phase: SyncPhase,
+        completed: usize,
+        total: usize,
+        current_mod: Option<String>,
+    ) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error::bad("Sync progress is unavailable"))?;
+        if let Some(progress) = state.as_mut().filter(|progress| {
+            progress.operation_id == self.operation_id && progress.phase.active()
+        }) {
+            progress.phase = phase;
+            progress.completed = completed;
+            progress.total = total;
+            progress.current_mod = current_mod;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, error: Option<String>) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(progress) = state.as_mut().filter(|progress| {
+            progress.operation_id == self.operation_id && progress.phase.active()
+        }) {
+            progress.phase = if error.is_some() {
+                SyncPhase::Failed
+            } else {
+                SyncPhase::Complete
+            };
+            progress.current_mod = None;
+            progress.error = error;
+        }
+        self.finished = true;
+    }
+}
+
+impl Drop for ProgressGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish(Some(
+                "Sync was interrupted. Review the plan before retrying".into(),
+            ));
+        }
+    }
+}
+
+#[utoipa::path(get, path="/api/saves/{name}/mods/sync", params(("name"=String, Path)), responses((status=200, body=Option<SyncProgress>), (status=400, body=ApiError)))]
+pub async fn progress(
+    State(app): State<App>,
+    Path(name): Path<String>,
+) -> Result<Json<Option<SyncProgress>>> {
+    let state = app
+        .sync_progress
+        .lock()
+        .map_err(|_| Error::bad("Sync progress is unavailable"))?;
+    Ok(Json(
+        state
+            .as_ref()
+            .filter(|progress| progress.save == name)
+            .cloned(),
+    ))
 }
 
 fn inventory(app: &App) -> Result<Vec<InstalledMod>> {
@@ -199,6 +351,9 @@ async fn download_exact(
     item: &SyncMod,
     engine: &str,
     client: &reqwest::Client,
+    progress: &ProgressGuard,
+    completed: usize,
+    total: usize,
 ) -> Result<Vec<u8>> {
     let (username, token) = credentials(app)?
         .ok_or_else(|| Error::bad("Configure Factorio username/token to download missing mods"))?;
@@ -217,6 +372,12 @@ async fn download_exact(
     url.query_pairs_mut()
         .append_pair("username", &username)
         .append_pair("token", &token);
+    progress.update(
+        SyncPhase::Downloading,
+        completed,
+        total,
+        Some(item.name.clone()),
+    )?;
     let response = client
         .get(url)
         .send()
@@ -278,10 +439,22 @@ pub async fn apply(
     input: std::result::Result<Json<SyncRequest>, JsonRejection>,
 ) -> Result<Json<ModsDocument>> {
     let input = json(input)?;
+    let mut progress = ProgressGuard::start(&app, &name, input.operation_id.clone())?;
+    let result = apply_impl(&app, &name, input, &progress).await;
+    progress.finish(result.as_ref().err().map(|error| error.message.clone()));
+    result
+}
+
+async fn apply_impl(
+    app: &App,
+    name: &str,
+    input: SyncRequest,
+    progress: &ProgressGuard,
+) -> Result<Json<ModsDocument>> {
     let plan = {
         let inner = app.inner.lock().await;
         stopped(&inner)?;
-        let (plan, _, _) = build_plan(&app, &name, known_engine(&inner)?)?;
+        let (plan, _, _) = build_plan(app, name, known_engine(&inner)?)?;
         if plan.revision != input.revision {
             return Err(Error::conflict(
                 "Save or mods changed. Review the sync plan again",
@@ -292,14 +465,39 @@ pub async fn apply(
         }
         plan
     };
-    let directory = directory(&app)?;
+    let directory = directory(app)?;
     let staging = tempfile::Builder::new()
         .prefix(".sync-")
         .tempdir_in(&directory)?;
     let client = client()?;
+    let total = plan
+        .mods
+        .iter()
+        .filter(|item| matches!(item.action, SyncAction::Download))
+        .count();
+    let mut completed = 0;
     for item in &plan.mods {
         if matches!(item.action, SyncAction::Download) {
-            let bytes = download_exact(&app, item, &plan.engine_version, &client).await?;
+            progress.update(
+                SyncPhase::Resolving,
+                completed,
+                total,
+                Some(item.name.clone()),
+            )?;
+            let bytes = download_exact(
+                app,
+                item,
+                &plan.engine_version,
+                &client,
+                progress,
+                completed,
+                total,
+            )
+            .await
+            .map_err(|error| Error {
+                status: error.status,
+                message: format!("{} {}: {}", item.name, item.version, error.message),
+            })?;
             storage::atomic_write(
                 &staging
                     .path()
@@ -307,11 +505,14 @@ pub async fn apply(
                 &bytes,
                 false,
             )?;
+            completed += 1;
+            progress.update(SyncPhase::Downloading, completed, total, None)?;
         }
     }
+    progress.update(SyncPhase::Validating, completed, total, None)?;
     let inner = app.inner.lock().await;
     stopped(&inner)?;
-    let (fresh, mut archives, old) = build_plan(&app, &name, known_engine(&inner)?)?;
+    let (fresh, mut archives, old) = build_plan(app, name, known_engine(&inner)?)?;
     if fresh.revision != plan.revision {
         return Err(Error::conflict(
             "Save or mods changed during download. Review the sync plan again",
@@ -359,9 +560,10 @@ pub async fn apply(
         &candidates,
         &desired,
         Some(&plan.engine_version),
-        &bundled_mods(&app)?,
+        &bundled_mods(app)?,
     )?;
     let bytes = serde_json::to_vec_pretty(&desired)?;
+    progress.update(SyncPhase::Applying, completed, total, None)?;
     let mut created = Vec::new();
     let publish = (|| -> Result<()> {
         for item in &plan.mods {
@@ -393,7 +595,7 @@ pub async fn apply(
         }
         return Err(error);
     }
-    Ok(Json(list(&app)?))
+    Ok(Json(list(app)?))
 }
 
 #[cfg(test)]
@@ -515,7 +717,8 @@ mod tests {
                 State(app.clone()),
                 Path("world.zip".into()),
                 Ok(Json(SyncRequest {
-                    revision: plan.revision
+                    revision: plan.revision,
+                    operation_id: None,
                 }))
             )
             .await
@@ -530,6 +733,7 @@ mod tests {
             Path("world.zip".into()),
             Ok(Json(SyncRequest {
                 revision: plan.revision,
+                operation_id: None,
             })),
         )
         .await;
@@ -574,7 +778,8 @@ mod tests {
                 State(app.clone()),
                 Path("world.zip".into()),
                 Ok(Json(SyncRequest {
-                    revision: plan.revision
+                    revision: plan.revision,
+                    operation_id: None,
                 }))
             )
             .await
@@ -589,6 +794,7 @@ mod tests {
             Path("world.zip".into()),
             Ok(Json(SyncRequest {
                 revision: plan.revision,
+                operation_id: None,
             })),
         )
         .await;
@@ -599,6 +805,156 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn progress_reports_success_and_only_matches_the_requested_save() -> TestResult {
+        let (temp, app) = setup().await?;
+        save(&app, &[])?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        let result = apply(
+            State(app.clone()),
+            Path("world.zip".into()),
+            Ok(Json(SyncRequest {
+                revision: plan.revision,
+                operation_id: Some("fixture-operation".into()),
+            })),
+        )
+        .await
+        .map_err(err)?;
+        assert!(result.0.mods.is_empty());
+        let response = crate::api::router(app.clone(), &temp.path().join("static"))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/saves/world.zip/mods/sync")
+                    .header("host", "localhost:9400")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let state: Option<SyncProgress> =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+        let state = state.ok_or("Missing completed progress")?;
+        assert_eq!(state.operation_id, "fixture-operation");
+        assert_eq!(state.phase, SyncPhase::Complete);
+        assert_eq!((state.completed, state.total), (0, 0));
+        assert!(state.error.is_none());
+        assert!(
+            progress(State(app), Path("other.zip".into()))
+                .await
+                .map_err(err)?
+                .0
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canceled_sync_releases_active_operation_and_records_failure() -> TestResult {
+        let (_temp, app) = setup().await?;
+        let inner = app.inner.lock().await;
+        let running_app = app.clone();
+        let operation = tokio::spawn(async move {
+            apply(
+                State(running_app),
+                Path("world.zip".into()),
+                Ok(Json(SyncRequest {
+                    revision: "fixture-revision".into(),
+                    operation_id: Some("canceled-operation".into()),
+                })),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if progress(State(app.clone()), Path("world.zip".into()))
+                    .await
+                    .map_err(err)?
+                    .0
+                    .is_some()
+                {
+                    return Ok::<(), std::io::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await??;
+        assert!(matches!(
+            ProgressGuard::start(&app, "other.zip", Some("another-operation".into())),
+            Err(Error {
+                status: StatusCode::CONFLICT,
+                ..
+            })
+        ));
+        operation.abort();
+        assert!(operation.await.is_err_and(|error| error.is_cancelled()));
+        drop(inner);
+        let state = progress(State(app.clone()), Path("world.zip".into()))
+            .await
+            .map_err(err)?
+            .0
+            .ok_or("Missing failure progress")?;
+        assert_eq!(state.phase, SyncPhase::Failed);
+        assert!(
+            state
+                .error
+                .is_some_and(|error| error.contains("interrupted"))
+        );
+        let mut retry =
+            ProgressGuard::start(&app, "other.zip", Some("retry-operation".into())).map_err(err)?;
+        retry.finish(None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_validation_is_reported_and_invalid_ids_are_rejected() -> TestResult {
+        let (_temp, app) = setup().await?;
+        for invalid in ["", "has spaces", "invalid/operation", &"x".repeat(65)] {
+            assert!(ProgressGuard::start(&app, "world.zip", Some(invalid.into())).is_err());
+        }
+        save(&app, &[("demo", [1, 0, 0])])?;
+        archive(&app, "demo", "1.0.0", &["missing"])?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        let result = apply(
+            State(app.clone()),
+            Path("world.zip".into()),
+            Ok(Json(SyncRequest {
+                revision: plan.revision,
+                operation_id: Some("validation-failure".into()),
+            })),
+        )
+        .await;
+        let error = result.err().ok_or("Expected dependency failure")?;
+        let state = progress(State(app.clone()), Path("world.zip".into()))
+            .await
+            .map_err(err)?
+            .0
+            .ok_or("Missing failure progress")?;
+        assert_eq!(state.phase, SyncPhase::Failed);
+        assert_eq!(state.error.as_deref(), Some(error.message.as_str()));
+        assert!(!directory(&app).map_err(err)?.join("mod-list.json").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_operation_cannot_be_overwritten_by_another_guard() -> TestResult {
+        let (_temp, app) = setup().await?;
+        let mut active =
+            ProgressGuard::start(&app, "world.zip", Some("first-operation".into())).map_err(err)?;
+        active
+            .update(SyncPhase::Downloading, 1, 3, Some("demo".into()))
+            .map_err(err)?;
+        assert!(ProgressGuard::start(&app, "other.zip", Some("second-operation".into())).is_err());
+        let state = progress(State(app.clone()), Path("world.zip".into()))
+            .await
+            .map_err(err)?
+            .0
+            .ok_or("Missing active progress")?;
+        assert_eq!(state.operation_id, "first-operation");
+        assert_eq!(state.phase, SyncPhase::Downloading);
+        assert_eq!((state.completed, state.total), (1, 3));
+        assert_eq!(state.current_mod.as_deref(), Some("demo"));
+        active.finish(None);
         Ok(())
     }
 }

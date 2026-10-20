@@ -767,7 +767,10 @@ fn expected(headers: &HeaderMap) -> Result<&str> {
 pub fn routes() -> Router<App> {
     Router::new()
         .route("/saves/{name}/mods", get(save_sync::plan))
-        .route("/saves/{name}/mods/sync", post(save_sync::apply))
+        .route(
+            "/saves/{name}/mods/sync",
+            get(save_sync::progress).post(save_sync::apply),
+        )
         .route("/mods", get(get_mods))
         .route(
             "/mods/upload",
