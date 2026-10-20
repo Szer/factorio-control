@@ -1,4 +1,4 @@
-import { authExpired } from "./authApi";
+import { authExpired, captureAuthEpoch } from "./authApi";
 import { z } from "zod";
 import type { components } from "./api.generated";
 
@@ -75,6 +75,7 @@ export const managerSchema = z.object({
     ups_history_minutes: z.number().int().min(1).max(1440),
     enable_script_telemetry: z.boolean(),
     game_bind_address: z.string().default("0.0.0.0"),
+    use_server_whitelist: z.boolean().default(false),
     game_port: z.number().int().min(1).max(65535).default(34197),
   }),
 }) satisfies z.ZodType<components["schemas"]["ManagerSettingsDocument"]>;
@@ -248,10 +249,11 @@ async function request<T>(
   schema: z.ZodType<T>,
   init?: RequestInit,
 ): Promise<T> {
+  const epoch = captureAuthEpoch();
   const response = await fetch(url, init);
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    if (response.status === 401) authExpired();
+    if (response.status === 401) authExpired(epoch);
     const problem = z.object({ message: z.string() }).safeParse(body);
     throw new ApiError(
       problem.success

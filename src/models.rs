@@ -138,6 +138,8 @@ pub struct ManagerSettings {
     pub game_bind_address: String,
     #[serde(default = "default_game_port")]
     pub game_port: u16,
+    #[serde(default)]
+    pub use_server_whitelist: bool,
     pub enable_script_telemetry: bool,
     #[schema(minimum = 1, maximum = 60)]
     pub poll_interval_seconds: u32,
@@ -155,6 +157,7 @@ impl Default for ManagerSettings {
         Self {
             game_bind_address: default_game_address(),
             game_port: default_game_port(),
+            use_server_whitelist: false,
             enable_script_telemetry: false,
             poll_interval_seconds: 2,
             ups_history_minutes: 10,

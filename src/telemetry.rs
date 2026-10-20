@@ -76,11 +76,15 @@ pub struct Session {
     address: SocketAddr,
     password: String,
     auto_pause: bool,
+    research_watch: std::sync::Arc<std::sync::Mutex<Vec<Research>>>,
 }
 impl Session {
     pub fn new(auto_pause: bool) -> Result<Self> {
-        let socket = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let address = socket.local_addr()?;
+        let port = std::env::var("FC_RCON_PORT")
+            .unwrap_or_else(|_| "27015".into())
+            .parse::<std::num::NonZeroU16>()
+            .map_err(|_| Error::bad("FC_RCON_PORT must be 1–65535"))?;
+        let address = SocketAddr::from(([127, 0, 0, 1], port.get()));
         let mut random = [0_u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
         let password = random.iter().map(|b| format!("{b:02x}")).collect();
@@ -88,6 +92,7 @@ impl Session {
             address,
             password,
             auto_pause,
+            research_watch: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
     pub fn configure(&self, command: &mut tokio::process::Command) {
@@ -105,6 +110,7 @@ impl Session {
 pub struct Runtime {
     session: Option<Session>,
     previous: Option<(WireSample, Instant)>,
+    completed: std::collections::BTreeMap<(String, String), Completed>,
     sampled_at: Option<u64>,
     players: Option<Vec<String>>,
     research: Option<Vec<Research>>,
@@ -135,6 +141,7 @@ impl Runtime {
     }
     fn clear_sample(&mut self) {
         self.previous = None;
+        self.completed.clear();
         self.sampled_at = None;
         self.research = None;
         self.ups = None;
@@ -232,25 +239,27 @@ impl Runtime {
             .previous
             .as_ref()
             .and_then(|(last, time)| measured_ups(last, &sample, observed.duration_since(*time)));
-        let prior = self
-            .previous
-            .as_ref()
-            .into_iter()
-            .flat_map(|(sample, _)| sample.completed.iter())
-            .map(|t| ((t.force.as_str(), t.name.as_str()), t))
-            .collect::<std::collections::HashMap<_, _>>();
         let finished = sample
             .completed
             .iter()
             .filter(|current| {
-                prior
-                    .get(&(current.force.as_str(), current.name.as_str()))
+                self.completed
+                    .get(&(current.force.clone(), current.name.clone()))
                     .is_some_and(|old| {
                         (!old.researched && current.researched) || current.level > old.level
                     })
             })
             .cloned()
             .collect::<Vec<_>>();
+        if sample.full_scan {
+            self.completed.clear();
+        }
+        for completed in &sample.completed {
+            self.completed.insert(
+                (completed.force.clone(), completed.name.clone()),
+                completed.clone(),
+            );
+        }
         for completed in &finished {
             self.activity(
                 ActivityKind::ResearchFinished,
@@ -319,6 +328,10 @@ struct WireSample {
     research: Vec<Research>,
     #[serde(deserialize_with = "array_or_empty_table")]
     completed: Vec<Completed>,
+    #[serde(default)]
+    full_scan: bool,
+    #[serde(default, deserialize_with = "array_or_empty_table")]
+    watch: Vec<Research>,
 }
 fn array_or_empty_table<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
 where
@@ -348,10 +361,55 @@ fn measured_ups(previous: &WireSample, current: &WireSample, elapsed: Duration) 
         .checked_sub(previous.tick)
         .map(|ticks| ticks as f64 / elapsed.as_secs_f64())
 }
-fn sample_command() -> &'static str {
-    "/sc local p={}; for _,v in pairs(game.connected_players) do p[#p+1]=v.name end; local r={}; local c={}; for _,f in pairs(game.forces) do if f.current_research then r[#r+1]={force=f.name,name=f.current_research.name,progress=f.research_progress,level=f.current_research.level} end; for _,t in pairs(f.technologies) do c[#c+1]={force=f.name,name=t.name,level=t.level,researched=t.researched} end end; rcon.print(helpers.table_to_json({tick=game.tick,speed=game.speed,paused=game.tick_paused,players=p,research=r,completed=c}))"
+fn lua_string(value: &str) -> String {
+    let escaped = value
+        .bytes()
+        .map(|byte| format!("\\{byte:03}"))
+        .collect::<String>();
+    format!("\"{escaped}\"")
+}
+fn sample_command(watched: &[Research], reconcile: bool) -> Result<String> {
+    if watched.len() > 1024
+        || watched
+            .iter()
+            .any(|r| r.force.len() > 1024 || r.name.len() > 1024)
+    {
+        return Err(Error::bad("Too many research entries for telemetry"));
+    }
+    let mut by_force = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    for research in watched {
+        by_force
+            .entry(&research.force)
+            .or_default()
+            .push(&research.name);
+    }
+    let watched = by_force
+        .into_iter()
+        .map(|(force, names)| {
+            let names = names
+                .into_iter()
+                .map(|name| format!("[{}]=true", lua_string(name)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{}]={{{names}}}", lua_string(force))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let scan = if reconcile {
+        "for name,t in pairs(f.technologies) do names[name]=true end; "
+    } else {
+        ""
+    };
+    let command = format!(
+        "/sc local w={{{watched}}}; local p={{}}; for _,v in pairs(game.connected_players) do p[#p+1]=v.name end; local r={{}}; local c={{}}; local next={{}}; for _,f in pairs(game.forces) do local names=w[f.name] or {{}}; local active={{}}; if f.current_research then r[#r+1]={{force=f.name,name=f.current_research.name,progress=f.research_progress,level=f.current_research.level}}; active[f.current_research.name]=true end; for _,q in pairs(f.research_queue or {{}}) do active[q.name]=true end; for name,_ in pairs(active) do names[name]=true; local t=f.technologies[name]; if t then next[#next+1]={{force=f.name,name=t.name,progress=0,level=t.level}} end end; {scan}for name,_ in pairs(names) do local t=f.technologies[name]; if t then c[#c+1]={{force=f.name,name=t.name,level=t.level,researched=t.researched}} end end end; rcon.print(helpers.table_to_json({{tick=game.tick,speed=game.speed,paused=game.tick_paused,players=p,research=r,completed=c,watch=next,full_scan={reconcile}}}))"
+    );
+    if command.len() > 65526 {
+        return Err(Error::bad("Research telemetry command exceeds RCON limit"));
+    }
+    Ok(command)
 }
 pub async fn run(app: App, generation: u64) {
+    let mut last_reconciliation: Option<Instant> = None;
     loop {
         let settings = match storage::manager_settings(&app.manager_settings_path()) {
             Ok(document) => document.settings,
@@ -396,9 +454,13 @@ pub async fn run(app: App, generation: u64) {
             }
         };
         if let Some(session) = request {
-            let started = Instant::now();
-            let result = tokio::time::timeout(Duration::from_secs(3), read_sample(&session)).await;
-            let observed = started + started.elapsed() / 2;
+            let reconcile =
+                last_reconciliation.is_none_or(|last| last.elapsed() >= Duration::from_secs(30));
+            if reconcile {
+                last_reconciliation = Some(Instant::now());
+            }
+            let (result, audit_failed) =
+                resilient_sample(reconcile, |mode| timed_sample(&session, mode)).await;
             let mut inner = app.inner.lock().await;
             if inner.generation != generation || inner.child.is_none() {
                 return;
@@ -408,7 +470,7 @@ pub async fn run(app: App, generation: u64) {
                 ServerState::Running | ServerState::Paused
             ) {
                 match result {
-                    Ok(Ok(sample)) => {
+                    Ok((sample, observed)) => {
                         let state = if sample.paused {
                             ServerState::Paused
                         } else {
@@ -421,11 +483,11 @@ pub async fn run(app: App, generation: u64) {
                         inner
                             .telemetry
                             .accept(sample, observed, settings.ups_history_minutes);
+                        if audit_failed {
+                            inner.telemetry.error = Some("Full research reconciliation is unavailable; live samples still work".into());
+                        }
                     }
-                    Ok(Err(error)) => inner.telemetry.unavailable(error.message),
-                    Err(_) => inner
-                        .telemetry
-                        .unavailable("Telemetry request timed out".into()),
+                    Err(error) => inner.telemetry.unavailable(error.message),
                 }
             }
         }
@@ -433,6 +495,25 @@ pub async fn run(app: App, generation: u64) {
             settings.poll_interval_seconds,
         )))
         .await;
+    }
+}
+async fn timed_sample(session: &Session, reconcile: bool) -> Result<(WireSample, Instant)> {
+    let started = Instant::now();
+    let sample = tokio::time::timeout(Duration::from_secs(3), read_sample_mode(session, reconcile))
+        .await
+        .map_err(|_| Error::bad("Telemetry request timed out"))??;
+    Ok((sample, started + started.elapsed() / 2))
+}
+async fn resilient_sample<T, F, Fut>(reconcile: bool, mut read: F) -> (Result<T>, bool)
+where
+    F: FnMut(bool) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let result = read(reconcile).await;
+    if reconcile && result.is_err() {
+        (read(false).await, true)
+    } else {
+        (result, false)
     }
 }
 async fn connect(session: &Session) -> Result<TcpStream> {
@@ -456,9 +537,20 @@ async fn connect(session: &Session) -> Result<TcpStream> {
     }
     Ok(stream)
 }
+#[cfg(test)]
 async fn read_sample(session: &Session) -> Result<WireSample> {
+    read_sample_mode(session, false).await
+}
+async fn read_sample_mode(session: &Session, reconcile: bool) -> Result<WireSample> {
     let mut stream = connect(session).await?;
-    send_packet(&mut stream, 2, 2, sample_command()).await?;
+    let command = {
+        let watched = session
+            .research_watch
+            .lock()
+            .map_err(|_| Error::bad("Research tracking unavailable"))?;
+        sample_command(&watched, reconcile)?
+    };
+    send_packet(&mut stream, 2, 2, &command).await?;
     let mut output = Vec::new();
     for _ in 0..256 {
         let (id, kind, body) = read_packet(&mut stream).await?;
@@ -485,6 +577,14 @@ async fn read_sample(session: &Session) -> Result<WireSample> {
                 }
                 // Empty-server auto-pause is separate from game.tick_paused.
                 sample.paused |= session.auto_pause && sample.players.is_empty();
+                if sample.watch.len() > 1024 {
+                    return Err(Error::bad("Too many active research entries for telemetry"));
+                }
+                *session
+                    .research_watch
+                    .lock()
+                    .map_err(|_| Error::bad("Research tracking unavailable"))? =
+                    sample.watch.clone();
                 return Ok(sample);
             }
             if output.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
@@ -535,7 +635,24 @@ mod tests {
             players: Vec::new(),
             research: Vec::new(),
             completed: Vec::new(),
+            full_scan: false,
+            watch: Vec::new(),
         }
+    }
+    #[test]
+    fn research_query_is_bounded_and_escapes_untrusted_names() -> Result<()> {
+        let watched = vec![Research {
+            force: "a\";error('injected')".into(),
+            name: "tech\\name".into(),
+            progress: 0.5,
+            level: 1,
+        }];
+        let command = sample_command(&watched, false)?;
+        assert!(!command.contains("pairs(f.technologies)"));
+        assert!(!command.contains("error('injected')"));
+        assert!(sample_command(&vec![watched[0].clone(); 1025], false).is_err());
+        assert_eq!(lua_string("a\""), "\"\\097\\034\"");
+        Ok(())
     }
     #[test]
     fn measures_real_elapsed_time_and_never_confuses_pause_with_zero() {
@@ -600,6 +717,61 @@ mod tests {
             runtime.activity(ActivityKind::Joined, "test".into());
         }
         assert_eq!(runtime.activity.len(), 200);
+    }
+    #[tokio::test]
+    async fn failed_reconciliation_keeps_live_samples_and_their_timestamps() {
+        let mut calls = Vec::new();
+        let observed = Instant::now();
+        let (result, warning) = resilient_sample(true, |full| {
+            calls.push(full);
+            std::future::ready(if full {
+                Err(Error::bad("Response exceeds size limit"))
+            } else {
+                Ok((sample(120, false), observed))
+            })
+        })
+        .await;
+        assert_eq!(calls, [true, false]);
+        assert!(warning);
+        assert!(result.is_ok_and(|(sample, time)| sample.tick == 120 && time == observed));
+        calls.clear();
+        let (result, warning) = resilient_sample(false, |full| {
+            calls.push(full);
+            std::future::ready(Ok(sample(240, false)))
+        })
+        .await;
+        assert_eq!(calls, [false]);
+        assert!(!warning);
+        assert!(result.is_ok_and(|sample| sample.tick == 240));
+    }
+    #[test]
+    fn reconciliation_detects_unqueued_research_across_lightweight_polls() {
+        let mut runtime = Runtime::default();
+        let instant = Instant::now();
+        let mut baseline = sample(0, false);
+        baseline.full_scan = true;
+        baseline.completed.push(Completed {
+            force: "player".into(),
+            name: "triggered-tech".into(),
+            level: 1,
+            researched: false,
+        });
+        runtime.accept(baseline.clone(), instant, 10);
+        runtime.accept(sample(120, false), instant + Duration::from_secs(2), 10);
+        baseline.tick = 1800;
+        baseline.completed[0].researched = true;
+        runtime.accept(baseline.clone(), instant + Duration::from_secs(30), 10);
+        baseline.tick = 3600;
+        runtime.accept(baseline, instant + Duration::from_secs(60), 10);
+        assert_eq!(
+            runtime
+                .activity
+                .iter()
+                .filter(|event| matches!(event.kind, ActivityKind::ResearchFinished))
+                .count(),
+            1
+        );
+        assert!(runtime.ups.is_some());
     }
     #[tokio::test]
     async fn fragmented_packets_round_trip_and_oversized_frame_is_rejected()
@@ -700,7 +872,20 @@ mod tests {
         let mut settings = storage::settings(&app.settings_path()).map_err(io)?;
         settings.settings.auto_pause = false;
         storage::update_settings(&app.settings_path(), settings).map_err(io)?;
+        let config = app.directory.join("create.ini");
+        storage::atomic_write(
+            &config,
+            format!(
+                "[path]\nread-data=__PATH__executable__/../../data\nwrite-data={}\n",
+                app.directory.display()
+            )
+            .as_bytes(),
+            false,
+        )
+        .map_err(io)?;
         let output = tokio::process::Command::new(&binary)
+            .arg("--config")
+            .arg(&config)
             .arg("--create")
             .arg(app.saves_path().join("test.zip"))
             .output()
@@ -743,6 +928,31 @@ mod tests {
         );
         let mut runtime = Runtime::default();
         runtime.accept(researching, Instant::now(), 10);
+        for _ in 0..8 {
+            script(&session, "game.forces.player.research_queue={}")
+                .await
+                .map_err(io)?;
+            let canceled = read_sample(&session).await.map_err(io)?;
+            assert!(
+                canceled.watch.is_empty(),
+                "Canceled entries must not accumulate in later polls"
+            );
+            assert!(
+                session
+                    .research_watch
+                    .lock()
+                    .map_err(|_| std::io::Error::other("watch lock"))?
+                    .is_empty()
+            );
+            script(
+                &session,
+                "assert(game.forces.player.add_research('automation'))",
+            )
+            .await
+            .map_err(io)?;
+            let resumed = read_sample(&session).await.map_err(io)?;
+            assert_eq!(resumed.watch.len(), 1);
+        }
         script(
             &session,
             "game.forces.player.technologies.automation.researched=true",
@@ -758,6 +968,29 @@ mod tests {
                 .any(|a| matches!(a.kind, ActivityKind::ResearchFinished)
                     && a.message.contains("automation"))
         );
+        let mut reconciliation = Runtime::default();
+        reconciliation.accept(
+            read_sample_mode(&session, true).await.map_err(io)?,
+            Instant::now(),
+            10,
+        );
+        script(
+            &session,
+            "game.forces.player.technologies['steel-processing'].researched=true",
+        )
+        .await
+        .map_err(io)?;
+        reconciliation.accept(read_sample(&session).await.map_err(io)?, Instant::now(), 10);
+        reconciliation.accept(
+            read_sample_mode(&session, true).await.map_err(io)?,
+            Instant::now(),
+            10,
+        );
+        assert!(reconciliation.activity.iter().any(|event| matches!(
+            event.kind,
+            ActivityKind::ResearchFinished
+        )
+            && event.message.contains("steel-processing")));
         script(&session, "game.tick_paused=true")
             .await
             .map_err(io)?;

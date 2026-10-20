@@ -1,4 +1,4 @@
-import { authExpired } from "./authApi";
+import { authExpired, captureAuthEpoch } from "./authApi";
 import { z } from "zod";
 import { ApiError, modsSchema } from "./api";
 
@@ -37,6 +37,7 @@ async function request<T>(
   method = "GET",
   body?: unknown,
 ): Promise<T> {
+  const epoch = captureAuthEpoch();
   const response = await fetch(`/api/mods${path}`, {
     method,
     ...(body === undefined
@@ -48,7 +49,7 @@ async function request<T>(
   });
   const value: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    if (response.status === 401) authExpired();
+    if (response.status === 401) authExpired(epoch);
     const error = z.object({ message: z.string() }).safeParse(value);
     throw new ApiError(
       error.success

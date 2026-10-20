@@ -203,10 +203,19 @@ fn journal_path(app: &App) -> PathBuf {
     app.directory.join("mod-transaction.json")
 }
 pub fn ensure_consistent(app: &App) -> Result<()> {
-    if journal_path(app).exists() {
-        return Err(Error::conflict(
-            "An interrupted mod transaction needs recovery. Open mod management and retry the operation before starting",
-        ));
+    recover(app)
+}
+
+pub fn cleanup_staging(app: &App) -> Result<()> {
+    for root in [&app.directory, &directory(app)?] {
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with(".sync-")
+                && entry.file_type()?.is_dir()
+            {
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
     }
     Ok(())
 }
@@ -271,7 +280,7 @@ fn recover(app: &App) -> Result<()> {
     fs::File::open(&app.directory)?.sync_all()?;
     Ok(())
 }
-fn begin_transaction(app: &App, added: Vec<String>, moved: Vec<String>) -> Result<()> {
+pub(super) fn begin_transaction(app: &App, added: Vec<String>, moved: Vec<String>) -> Result<()> {
     let path = directory(app)?;
     let (_, list) = storage::read_document(&path.join("mod-list.json"))?;
     let settings = mod_settings::read_bytes(&path.join("mod-settings.dat"))?;
@@ -286,7 +295,11 @@ fn begin_transaction(app: &App, added: Vec<String>, moved: Vec<String>) -> Resul
     }
     storage::atomic_write(&journal_path(app), &bytes, false)
 }
-fn write_activation(app: &App, list: &ModList, settings: Option<Option<&[u8]>>) -> Result<()> {
+pub(super) fn write_activation(
+    app: &App,
+    list: &ModList,
+    settings: Option<Option<&[u8]>>,
+) -> Result<()> {
     let path = directory(app)?;
     if !journal_path(app).exists() {
         begin_transaction(app, Vec::new(), Vec::new())?;
@@ -369,14 +382,18 @@ fn validate_selection(
     check_enabled_compatibility(candidates, engine)?;
     check_dependencies(candidates, list, Some(engine), &bundled)
 }
-fn archive_info(path: &FsPath) -> Result<(ModInfo, u64)> {
+fn hash_file(path: &FsPath) -> Result<String> {
+    let mut hash = Sha256::new();
+    std::io::copy(&mut fs::File::open(path)?, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+pub(super) fn archive_info(path: &FsPath) -> Result<(ModInfo, u64)> {
     storage::ensure_regular(path)?;
     let size = fs::metadata(path)?.len();
     if size > MAX_ARCHIVE as u64 {
-        return Err(Error::bad("Mod archive exceeds 64 MiB"));
+        return Err(Error::bad("Mod archive exceeds 1 GiB"));
     }
-    let bytes = fs::read(path)?;
-    Ok((validate_archive(&bytes)?, size))
+    Ok((validate_archive_reader(fs::File::open(path)?, size)?, size))
 }
 fn selection(app: &App, requested: &ModList) -> Result<(ModList, Vec<InstalledMod>)> {
     let path = directory(app)?;
@@ -432,6 +449,7 @@ fn selection(app: &App, requested: &ModList) -> Result<(ModList, Vec<InstalledMo
     }
     Ok((list, candidates))
 }
+#[cfg(test)]
 fn verify_download(name: &str, release: &Release, bytes: &[u8]) -> Result<ModInfo> {
     if release.sha1.len() != 40
         || release.sha1.to_ascii_lowercase() != format!("{:x}", sha1::Sha1::digest(bytes))
@@ -453,7 +471,8 @@ async fn download(
     name: &str,
     release: &Release,
     credentials: &(String, String),
-) -> Result<Vec<u8>> {
+    directory: &FsPath,
+) -> Result<tempfile::NamedTempFile> {
     if !release.download_url.starts_with("/download/")
         || release.download_url.contains(['?', '#', '\\', '%'])
         || release.download_url.contains("..")
@@ -471,10 +490,62 @@ async fn download(
         .send()
         .await
         .map_err(|_| Error::bad("Mod download failed"))?;
-    let bytes = response_bytes(response, MAX_ARCHIVE).await?;
-    verify_download(name, release, &bytes)?;
-    Ok(bytes)
+    download_response(
+        response,
+        release.clone(),
+        name.to_owned(),
+        directory.to_owned(),
+    )
+    .await
 }
+pub(super) async fn download_response(
+    mut response: reqwest::Response,
+    release: Release,
+    name: String,
+    directory: PathBuf,
+) -> Result<tempfile::NamedTempFile> {
+    use tokio::io::AsyncWriteExt;
+    if !response.status().is_success() {
+        return Err(Error::bad("Mod download failed"));
+    }
+    let temporary = tempfile::NamedTempFile::new_in(directory)?;
+    let (file, path) = temporary.into_parts();
+    let mut file = tokio::fs::File::from_std(file);
+    let mut total = 0_usize;
+    let mut hash = sha1::Sha1::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| Error::bad("Mod download was interrupted"))?
+    {
+        total = total
+            .checked_add(chunk.len())
+            .filter(|value| *value <= MAX_ARCHIVE)
+            .ok_or_else(|| Error::bad("Mod ZIP exceeds 1 GiB"))?;
+        hash.update(&chunk);
+        file.write_all(&chunk).await?;
+    }
+    file.sync_all().await?;
+    if release.sha1.len() != 40
+        || release.sha1.to_ascii_lowercase() != format!("{:x}", hash.finalize())
+    {
+        return Err(Error::bad(
+            "Downloaded mod checksum does not match the portal",
+        ));
+    }
+    let temporary = tempfile::NamedTempFile::from_parts(file.into_std().await, path);
+    blocking(move || {
+        let (info, _) = archive_info(temporary.path())?;
+        if info.name != name || info.version != release.version {
+            return Err(Error::bad(
+                "Downloaded mod identity does not match the selected release",
+            ));
+        }
+        Ok(temporary)
+    })
+    .await
+}
+
 fn commit_staged(
     app: &App,
     revision: &str,
@@ -506,13 +577,13 @@ fn commit_staged(
             let target = path.join(format!("{}_{}.zip", info.name, info.version));
             storage::ensure_regular(&target)?;
             if target.exists() {
-                if fs::read(&target)? != fs::read(file)? {
+                if hash_file(&target)? != hash_file(file)? {
                     return Err(Error::conflict(
                         "A different archive already exists for this mod version",
                     ));
                 }
             } else {
-                storage::atomic_write(&target, &fs::read(file)?, false)?;
+                copy_archive(file, &target)?;
             }
         }
         write_activation(app, &mod_list, None)
@@ -525,17 +596,26 @@ fn commit_staged(
 }
 pub fn routes() -> Router<App> {
     Router::new()
-        .route("/mods/operation", get(operation_progress))
+        .route(
+            "/mods/operation",
+            get(operation_progress).delete(remove_reserved),
+        )
         .route("/mods/portal/search", get(search))
         .route("/mods/portal/{name}/releases", get(portal_versions))
         .route("/mods/portal/install", post(install_portal))
         .route("/mods/bulk/preview", post(bulk_preview))
         .route("/mods/bulk/apply", post(bulk_apply))
-        .route("/mods/packs", get(packs).post(create_pack))
+        .route(
+            "/mods/packs",
+            get(packs).post(create_pack).delete(remove_reserved),
+        )
         .route("/mods/packs/{name}", axum::routing::delete(delete_pack))
         .route("/mods/packs/{name}/restore", post(restore_pack))
-        .route("/mods/export", get(export_all))
-        .route("/mods/list", get(export_list).put(import_list))
+        .route("/mods/export", get(export_all).delete(remove_reserved))
+        .route(
+            "/mods/list",
+            get(export_list).put(import_list).delete(remove_reserved),
+        )
         .route("/mods/{name}", axum::routing::delete(remove_mod))
         .layer(DefaultBodyLimit::max(1024 * 1024))
 }
@@ -562,15 +642,14 @@ pub async fn search(
     if query.is_empty() || query.len() > 100 {
         return Err(Error::bad("Search uses 1–100 characters"));
     }
-    let (engine, credentials) = {
-        let inner = app.inner.lock().await;
-        (
-            known_engine(&inner)?.to_owned(),
+    let engine = known_engine(&*app.inner.lock().await)?.to_owned();
+    let credentials = app
+        .mod_storage(|app| {
             credentials(&app)?.ok_or_else(|| {
                 Error::bad("Portal search requires your Factorio username and token")
-            })?,
-        )
-    };
+            })
+        })
+        .await?;
     let _permit = UPDATE_CHECKS
         .acquire()
         .await
@@ -625,26 +704,32 @@ pub async fn portal_versions(
     releases.sort_by_key(|item| std::cmp::Reverse(version(&item.version).ok()));
     Ok(Json(PortalReleases { name, releases }))
 }
-async fn apply_changes(
+pub(super) async fn apply_changes(
     app: &App,
     revision: &str,
     changes: &[(String, String)],
 ) -> Result<ModsDocument> {
     let _operation = OPERATIONS.lock().await;
+    let storage_guard = app.mod_operations.clone().lock_owned().await;
     if changes.is_empty() || changes.len() > MAX_MODS {
         return Err(Error::bad("Select 1–500 mod versions"));
     }
-    let (engine, credentials) = {
+    let engine = {
         let inner = app.inner.lock().await;
         stopped(&inner)?;
-        recover(app)?;
-        current(app, revision)?;
-        (
-            known_engine(&inner)?.to_owned(),
-            credentials(app)?
-                .ok_or_else(|| Error::bad("Mod downloads require a Factorio username and token"))?,
-        )
+        known_engine(&inner)?.to_owned()
     };
+    let snapshot = app.clone();
+    let expected = revision.to_owned();
+    let (credentials, storage_guard) = blocking(move || {
+        let guard = storage_guard;
+        ensure_consistent(&snapshot)?;
+        current(&snapshot, &expected)?;
+        let credentials = credentials(&snapshot)?
+            .ok_or_else(|| Error::bad("Mod downloads require a Factorio username and token"))?;
+        Ok((credentials, guard))
+    })
+    .await?;
     let progress = ProgressGuard::new(app, changes.len())?;
     let mut seen = HashSet::new();
     let client = client()?;
@@ -670,25 +755,38 @@ async fn apply_changes(
             })
             .ok_or_else(|| Error::bad("Selected mod release is unavailable or incompatible"))?;
         progress.update("Downloading", index, Some(name))?;
-        let bytes = download(&client, name, release, &credentials).await?;
-        total = total.saturating_add(bytes.len() as u64);
+        let file = download(&client, name, release, &credentials, &app.directory).await?;
+        total = total.saturating_add(file.as_file().metadata()?.len());
         if total > MAX_BATCH_BYTES {
             return Err(Error::bad("Mod batch exceeds 1 GiB"));
         }
-        let info = verify_download(name, release, &bytes)?;
-        let path = staging.path().join(format!("{name}_{target}.zip"));
-        storage::atomic_write(&path, &bytes, false)?;
+        let destination = staging.path().join(format!("{name}_{target}.zip"));
+        let (info, path) = blocking(move || {
+            let (info, _) = archive_info(file.path())?;
+            copy_archive(file.path(), &destination)?;
+            Ok((info, destination))
+        })
+        .await?;
         staged.push((info, path));
     }
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    if known_engine(&inner)? != engine {
-        return Err(Error::conflict(
-            "Factorio version changed; review mod choices again",
-        ));
+    {
+        let inner = app.inner.lock().await;
+        stopped(&inner)?;
+        if known_engine(&inner)? != engine {
+            return Err(Error::conflict(
+                "Factorio version changed; review mod choices again",
+            ));
+        }
     }
     progress.update("Validating and activating", changes.len(), None)?;
-    let result = commit_staged(app, revision, &staged, &engine)?;
+    let snapshot = app.clone();
+    let expected = revision.to_owned();
+    let result = blocking(move || {
+        let _guard = storage_guard;
+        let _staging = staging;
+        commit_staged(&snapshot, &expected, &staged, &engine)
+    })
+    .await?;
     progress.complete()?;
     Ok(result)
 }
@@ -708,14 +806,14 @@ pub async fn bulk_preview(
     input: std::result::Result<Json<RevisionRequest>, JsonRejection>,
 ) -> Result<Json<BulkPlan>> {
     let input = json(input)?;
-    let (document, engine) = {
-        let inner = app.inner.lock().await;
-        stopped(&inner)?;
-        (
-            current(&app, &input.revision)?,
-            known_engine(&inner)?.to_owned(),
-        )
-    };
+    let revision = input.revision.clone();
+    let (document, engine) = mutation(&app, move |app, engine| {
+        Ok((
+            current(&app, &revision)?,
+            checked_engine(engine.as_deref())?.to_owned(),
+        ))
+    })
+    .await?;
     let _permit = UPDATE_CHECKS
         .acquire()
         .await
@@ -734,11 +832,12 @@ pub async fn bulk_preview(
             });
         }
     }
-    {
-        let inner = app.inner.lock().await;
-        stopped(&inner)?;
-        current(&app, &input.revision)?;
-    }
+    let revision = input.revision.clone();
+    mutation(&app, move |app, _engine| {
+        current(&app, &revision)?;
+        Ok(())
+    })
+    .await?;
     Ok(Json(BulkPlan {
         revision: input.revision,
         changes,
@@ -750,11 +849,10 @@ pub async fn bulk_apply(
     input: std::result::Result<Json<BulkPlan>, JsonRejection>,
 ) -> Result<Json<ModsDocument>> {
     let input = json(input)?;
-    {
-        let inner = app.inner.lock().await;
-        stopped(&inner)?;
-        let document = current(&app, &input.revision)?;
-        for change in &input.changes {
+    let check = input.clone();
+    mutation(&app, move |app, _engine| {
+        let document = current(&app, &check.revision)?;
+        for change in &check.changes {
             if !document
                 .mods
                 .iter()
@@ -766,7 +864,9 @@ pub async fn bulk_apply(
                 ));
             }
         }
-    }
+        Ok(())
+    })
+    .await?;
     Ok(Json(
         apply_changes(
             &app,
@@ -782,24 +882,26 @@ pub async fn bulk_apply(
 }
 #[utoipa::path(get,path="/api/mods/list",responses((status=200,body=ListDocument)))]
 pub async fn export_list(State(app): State<App>) -> Result<Json<ListDocument>> {
-    let _inner = app.inner.lock().await;
-    let document = list(&app)?;
-    let (mut list, _) = read_list(&directory(&app)?)?;
-    for item in &document.mods {
-        set_entry(&mut list, &item.name, item.enabled, &item.version);
-    }
-    Ok(Json(ListDocument {
-        revision: document.revision,
-        mods: list
-            .mods
-            .into_iter()
-            .map(|item| ListEntry {
-                name: item.name,
-                enabled: item.enabled,
-                version: item.version,
-            })
-            .collect(),
-    }))
+    app.mod_storage(move |app| {
+        let document = list(&app)?;
+        let (mut list, _) = read_list(&directory(&app)?)?;
+        for item in &document.mods {
+            set_entry(&mut list, &item.name, item.enabled, &item.version);
+        }
+        Ok(Json(ListDocument {
+            revision: document.revision,
+            mods: list
+                .mods
+                .into_iter()
+                .map(|item| ListEntry {
+                    name: item.name,
+                    enabled: item.enabled,
+                    version: item.version,
+                })
+                .collect(),
+        }))
+    })
+    .await
 }
 #[utoipa::path(put,path="/api/mods/list",request_body=ListDocument,responses((status=200,body=ModsDocument)))]
 pub async fn import_list(
@@ -807,58 +909,66 @@ pub async fn import_list(
     input: std::result::Result<Json<ListDocument>, JsonRejection>,
 ) -> Result<Json<ModsDocument>> {
     let input = json(input)?;
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    recover(&app)?;
-    current(&app, &input.revision)?;
-    let requested = ModList {
-        mods: input
-            .mods
-            .into_iter()
-            .map(|item| ModListEntry {
-                name: item.name,
-                enabled: item.enabled,
-                version: item.version,
-                other: BTreeMap::new(),
-            })
-            .collect(),
-        other: BTreeMap::new(),
-    };
-    let (list, candidates) = selection(&app, &requested)?;
-    validate_selection(&app, &list, &candidates, known_engine(&inner)?)?;
-    write_activation(&app, &list, None)?;
-    Ok(Json(list_mods(&app)?))
+    mutation(&app, move |app, engine| {
+        recover(&app)?;
+        current(&app, &input.revision)?;
+        let requested = ModList {
+            mods: input
+                .mods
+                .into_iter()
+                .map(|item| ModListEntry {
+                    name: item.name,
+                    enabled: item.enabled,
+                    version: item.version,
+                    other: BTreeMap::new(),
+                })
+                .collect(),
+            other: BTreeMap::new(),
+        };
+        let (list, candidates) = selection(&app, &requested)?;
+        validate_selection(&app, &list, &candidates, checked_engine(engine.as_deref())?)?;
+        write_activation(&app, &list, None)?;
+        Ok(Json(list_mods(&app)?))
+    })
+    .await
 }
 fn list_mods(app: &App) -> Result<ModsDocument> {
     super::list(app)
 }
 #[utoipa::path(get,path="/api/mods/packs",responses((status=200,body=Vec<PackSummary>)))]
 pub async fn packs(State(app): State<App>) -> Result<Json<Vec<PackSummary>>> {
-    let _inner = app.inner.lock().await;
-    let path = subdirectory(&app.directory, "mod-packs")?;
-    let mut result = Vec::new();
-    for file in fs::read_dir(path)? {
-        let file = file?;
-        if !file.file_name().to_string_lossy().ends_with(".json") {
-            continue;
+    app.mod_storage(move |app| {
+        let path = subdirectory(&app.directory, "mod-packs")?;
+        let mut result = Vec::new();
+        for file in fs::read_dir(path)? {
+            let file = file?;
+            if !file.file_type()?.is_file()
+                || !file.file_name().to_string_lossy().ends_with(".json")
+            {
+                continue;
+            }
+            let name = file
+                .file_name()
+                .to_string_lossy()
+                .trim_end_matches(".json")
+                .to_owned();
+            if !valid_name(&name) || name.len() > 64 {
+                continue;
+            }
+            if result.len() >= 100 {
+                return Err(Error::bad("Too many mod packs"));
+            }
+            let (pack, revision) = read_pack(&app, &name)?;
+            result.push(PackSummary {
+                revision,
+                name,
+                mods: pack.archives.len(),
+            });
         }
-        if result.len() >= 100 {
-            return Err(Error::bad("Too many mod packs"));
-        }
-        let name = file
-            .file_name()
-            .to_string_lossy()
-            .trim_end_matches(".json")
-            .to_owned();
-        let (pack, revision) = read_pack(&app, &name)?;
-        result.push(PackSummary {
-            revision,
-            name,
-            mods: pack.archives.len(),
-        });
-    }
-    result.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(Json(result))
+        result.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Json(result))
+    })
+    .await
 }
 fn read_pack(app: &App, name: &str) -> Result<(Pack, String)> {
     let path = pack_path(app, name)?;
@@ -895,9 +1005,8 @@ pub async fn create_pack(
     input: std::result::Result<Json<PackRequest>, JsonRejection>,
 ) -> Result<Json<Vec<PackSummary>>> {
     let input = json(input)?;
-    {
-        let inner = app.inner.lock().await;
-        stopped(&inner)?;
+
+    mutation(&app, move |app, _engine| {
         recover(&app)?;
         let document = current(&app, &input.revision)?;
         let path = pack_path(&app, &input.name)?;
@@ -917,10 +1026,7 @@ pub async fn create_pack(
             set_entry(&mut list, &item.name, item.enabled, &item.version);
             let (_, _) = archive_info(&root.join(&item.file_name))?;
             archives.push(PackArchive {
-                sha256: format!(
-                    "{:x}",
-                    Sha256::digest(fs::read(root.join(&item.file_name))?)
-                ),
+                sha256: hash_file(&root.join(&item.file_name))?,
                 file_name: item.file_name,
             });
         }
@@ -930,7 +1036,9 @@ pub async fn create_pack(
             settings: mod_settings::read_bytes(&root.join("mod-settings.dat"))?,
         };
         storage::atomic_write(&path, &serde_json::to_vec(&pack)?, false)?;
-    }
+        Ok(())
+    })
+    .await?;
     packs(State(app)).await
 }
 #[utoipa::path(delete,path="/api/mods/packs/{name}",params(("name"=String,Path),("revision"=String,Query),("pack_revision"=String,Query)),responses((status=200,body=Vec<PackSummary>)))]
@@ -939,15 +1047,15 @@ pub async fn delete_pack(
     Path(name): Path<String>,
     Query(query): Query<PackRevisionQuery>,
 ) -> Result<Json<Vec<PackSummary>>> {
-    {
-        let inner = app.inner.lock().await;
-        stopped(&inner)?;
+    mutation(&app, move |app, _engine| {
         current(&app, &query.revision)?;
         expected_pack(&app, &name, &query.pack_revision)?;
         let path = pack_path(&app, &name)?;
         storage::ensure_regular(&path)?;
         fs::remove_file(path)?;
-    }
+        Ok(())
+    })
+    .await?;
     packs(State(app)).await
 }
 #[utoipa::path(post,path="/api/mods/packs/{name}/restore",params(("name"=String,Path)),request_body=RestorePackRequest,responses((status=200,body=ModsDocument)))]
@@ -957,62 +1065,62 @@ pub async fn restore_pack(
     input: std::result::Result<Json<RestorePackRequest>, JsonRejection>,
 ) -> Result<Json<ModsDocument>> {
     let input = json(input)?;
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    recover(&app)?;
-    current(&app, &input.revision)?;
-    let pack = expected_pack(&app, &name, &input.pack_revision)?;
-    let root = directory(&app)?;
-    if pack.archives.len() > MAX_MODS
-        || pack
+    mutation(&app, move |app, engine| {
+        recover(&app)?;
+        current(&app, &input.revision)?;
+        let pack = expected_pack(&app, &name, &input.pack_revision)?;
+        let root = directory(&app)?;
+        if pack.archives.len() > MAX_MODS
+            || pack
+                .archives
+                .iter()
+                .any(|item| !safe_archive_name(&item.file_name))
+        {
+            return Err(Error::bad("Invalid mod pack archive references"));
+        }
+        let added: Vec<_> = pack
             .archives
             .iter()
-            .any(|item| !safe_archive_name(&item.file_name))
-    {
-        return Err(Error::bad("Invalid mod pack archive references"));
-    }
-    let added: Vec<_> = pack
-        .archives
-        .iter()
-        .filter(|item| !root.join(&item.file_name).exists())
-        .map(|item| item.file_name.clone())
-        .collect();
-    begin_transaction(&app, added, Vec::new())?;
-    let result = (|| {
-        for archive in &pack.archives {
-            if !safe_archive_name(&archive.file_name) {
-                return Err(Error::bad("Invalid archive reference in pack"));
+            .filter(|item| !root.join(&item.file_name).exists())
+            .map(|item| item.file_name.clone())
+            .collect();
+        begin_transaction(&app, added, Vec::new())?;
+        let result = (|| {
+            for archive in &pack.archives {
+                if !safe_archive_name(&archive.file_name) {
+                    return Err(Error::bad("Invalid archive reference in pack"));
+                }
+                let path = root.join(&archive.file_name);
+                let source = if path.exists() {
+                    path.clone()
+                } else {
+                    subdirectory(&root, ".archive")?.join(&archive.file_name)
+                };
+                let (_, _) = archive_info(&source)?;
+                if hash_file(&source)? != archive.sha256 {
+                    return Err(Error::bad("Mod pack archive checksum changed"));
+                }
+                if !path.exists() {
+                    copy_archive(&source, &path)?;
+                }
             }
-            let path = root.join(&archive.file_name);
-            let source = if path.exists() {
-                path.clone()
-            } else {
-                subdirectory(&root, ".archive")?.join(&archive.file_name)
-            };
-            let (_, _) = archive_info(&source)?;
-            let bytes = fs::read(&source)?;
-            if format!("{:x}", Sha256::digest(&bytes)) != archive.sha256 {
-                return Err(Error::bad("Mod pack archive checksum changed"));
+            if let Some(bytes) = &pack.settings {
+                let staging = tempfile::tempdir_in(&app.directory)?;
+                let path = staging.path().join("mod-settings.dat");
+                storage::atomic_write(&path, bytes, false)?;
+                mod_settings::read(&path)?;
             }
-            if !path.exists() {
-                storage::atomic_write(&path, &bytes, false)?;
-            }
+            let (list, candidates) = selection(&app, &pack.list)?;
+            validate_selection(&app, &list, &candidates, checked_engine(engine.as_deref())?)?;
+            write_activation(&app, &list, Some(pack.settings.as_deref()))
+        })();
+        if let Err(error) = result {
+            recover(&app)?;
+            return Err(error);
         }
-        if let Some(bytes) = &pack.settings {
-            let staging = tempfile::tempdir_in(&app.directory)?;
-            let path = staging.path().join("mod-settings.dat");
-            storage::atomic_write(&path, bytes, false)?;
-            mod_settings::read(&path)?;
-        }
-        let (list, candidates) = selection(&app, &pack.list)?;
-        validate_selection(&app, &list, &candidates, known_engine(&inner)?)?;
-        write_activation(&app, &list, Some(pack.settings.as_deref()))
-    })();
-    if let Err(error) = result {
-        recover(&app)?;
-        return Err(error);
-    }
-    Ok(Json(list_mods(&app)?))
+        Ok(Json(list_mods(&app)?))
+    })
+    .await
 }
 fn safe_archive_name(value: &str) -> bool {
     value.ends_with(".zip")
@@ -1020,122 +1128,179 @@ fn safe_archive_name(value: &str) -> bool {
         && !value.starts_with('.')
         && value.len() <= 220
 }
+pub async fn remove_reserved(
+    State(app): State<App>,
+    OriginalUri(uri): OriginalUri,
+    Query(query): Query<RevisionQuery>,
+) -> Result<Json<ModsDocument>> {
+    let name = uri
+        .path()
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| Error::bad("Invalid mod name"))?
+        .to_owned();
+    remove_mod(State(app), Path(name), Query(query)).await
+}
 #[utoipa::path(delete,path="/api/mods/{name}",params(("name"=String,Path),("revision"=String,Query)),responses((status=200,body=ModsDocument)))]
 pub async fn remove_mod(
     State(app): State<App>,
     Path(name): Path<String>,
     Query(query): Query<RevisionQuery>,
 ) -> Result<Json<ModsDocument>> {
-    let inner = app.inner.lock().await;
-    stopped(&inner)?;
-    recover(&app)?;
-    let document = current(&app, &query.revision)?;
-    if !valid_name(&name) || protected(&name) || !document.mods.iter().any(|item| item.name == name)
-    {
-        return Err(Error::bad("Mod is not installed or cannot be removed"));
-    }
-    let root = directory(&app)?;
-    let (mut mod_list, _) = read_list(&root)?;
-    mod_list.mods.retain(|item| item.name != name);
-    let candidates: Vec<_> = document
-        .mods
-        .into_iter()
-        .filter(|item| item.name != name)
-        .collect();
-    validate_selection(&app, &mod_list, &candidates, known_engine(&inner)?)?;
-    let archive = subdirectory(&root, ".archive")?;
-    let mut moves = Vec::new();
-    for file in fs::read_dir(&root)? {
-        let file = file?;
-        if file.file_name().to_string_lossy().ends_with(".zip")
-            && archive_info(&file.path())?.0.name == name
+    mutation(&app, move |app, engine| {
+        recover(&app)?;
+        let document = current(&app, &query.revision)?;
+        if !valid_name(&name)
+            || protected(&name)
+            || !document.mods.iter().any(|item| item.name == name)
         {
-            moves.push(file.file_name().to_string_lossy().into_owned());
+            return Err(Error::bad("Mod is not installed or cannot be removed"));
         }
-    }
-    begin_transaction(&app, Vec::new(), moves)?;
-    let result = (|| {
+        let root = directory(&app)?;
+        let (mut mod_list, _) = read_list(&root)?;
+        mod_list.mods.retain(|item| item.name != name);
+        let candidates: Vec<_> = document
+            .mods
+            .into_iter()
+            .filter(|item| item.name != name)
+            .collect();
+        validate_selection(
+            &app,
+            &mod_list,
+            &candidates,
+            checked_engine(engine.as_deref())?,
+        )?;
+        let archive = subdirectory(&root, ".archive")?;
+        let mut moves = Vec::new();
         for file in fs::read_dir(&root)? {
             let file = file?;
-            if !file.file_name().to_string_lossy().ends_with(".zip") {
-                continue;
-            }
-            let (info, _) = archive_info(&file.path())?;
-            if info.name == name {
-                let target = archive.join(file.file_name());
-                storage::ensure_regular(&target)?;
-                if target.exists() {
-                    if fs::read(&target)? != fs::read(file.path())? {
-                        return Err(Error::conflict("Archived version has different content"));
-                    }
-                    fs::remove_file(file.path())?;
-                } else {
-                    fs::rename(file.path(), &target)?;
-                }
+            if file.file_name().to_string_lossy().ends_with(".zip")
+                && archive_info(&file.path())?.0.name == name
+            {
+                moves.push(file.file_name().to_string_lossy().into_owned());
             }
         }
-        fs::File::open(&archive)?.sync_all()?;
-        fs::File::open(&root)?.sync_all()?;
-        write_activation(&app, &mod_list, None)
-    })();
-    if let Err(error) = result {
-        recover(&app)?;
-        return Err(error);
-    }
-    Ok(Json(list_mods(&app)?))
+        begin_transaction(&app, Vec::new(), moves)?;
+        let result = (|| {
+            for file in fs::read_dir(&root)? {
+                let file = file?;
+                if !file.file_name().to_string_lossy().ends_with(".zip") {
+                    continue;
+                }
+                let (info, _) = archive_info(&file.path())?;
+                if info.name == name {
+                    let target = archive.join(file.file_name());
+                    storage::ensure_regular(&target)?;
+                    if target.exists() {
+                        if hash_file(&target)? != hash_file(&file.path())? {
+                            return Err(Error::conflict("Archived version has different content"));
+                        }
+                        fs::remove_file(file.path())?;
+                    } else {
+                        fs::rename(file.path(), &target)?;
+                    }
+                }
+            }
+            fs::File::open(&archive)?.sync_all()?;
+            fs::File::open(&root)?.sync_all()?;
+            write_activation(&app, &mod_list, None)
+        })();
+        if let Err(error) = result {
+            recover(&app)?;
+            return Err(error);
+        }
+        Ok(Json(list_mods(&app)?))
+    })
+    .await
 }
 #[utoipa::path(get,path="/api/mods/export",responses((status=200,content_type="application/zip")))]
 pub async fn export_all(State(app): State<App>) -> Result<Response> {
-    let _inner = app.inner.lock().await;
-    let document = list(&app)?;
-    let root = directory(&app)?;
-    let temporary = tempfile::tempfile_in(&app.directory)?;
-    let mut writer = zip::ZipWriter::new(temporary);
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    let mut total = 0_u64;
-    for item in document.mods {
-        let path = root.join(&item.file_name);
-        storage::ensure_regular(&path)?;
-        total = total.saturating_add(fs::metadata(&path)?.len());
-        if total > MAX_BATCH_BYTES {
-            return Err(Error::bad("Mod export exceeds 1 GiB"));
+    app.mod_storage(move |app| {
+        let document = list(&app)?;
+        let root = directory(&app)?;
+        #[cfg(test)]
+        export_checkpoint(&app)?;
+        let temporary = tempfile::tempfile_in(&app.directory)?;
+        let mut writer = zip::ZipWriter::new(temporary);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        let mut total = 0_u64;
+        for item in document.mods {
+            let path = root.join(&item.file_name);
+            storage::ensure_regular(&path)?;
+            total = total.saturating_add(fs::metadata(&path)?.len());
+            if total > MAX_BATCH_BYTES {
+                return Err(Error::bad("Mod export exceeds 1 GiB"));
+            }
+            writer
+                .start_file(item.file_name, options)
+                .map_err(|_| Error::bad("Could not build mod export"))?;
+            std::io::copy(&mut fs::File::open(path)?, &mut writer)?;
         }
+        let (list, _) = read_list(&root)?;
         writer
-            .start_file(item.file_name, options)
+            .start_file("mod-list.json", options)
             .map_err(|_| Error::bad("Could not build mod export"))?;
-        std::io::copy(&mut fs::File::open(path)?, &mut writer)?;
-    }
-    let (list, _) = read_list(&root)?;
-    writer
-        .start_file("mod-list.json", options)
-        .map_err(|_| Error::bad("Could not build mod export"))?;
-    writer.write_all(&serde_json::to_vec_pretty(&list)?)?;
-    if let Some(bytes) = mod_settings::read_bytes(&root.join("mod-settings.dat"))? {
-        writer
-            .start_file("mod-settings.dat", options)
-            .map_err(|_| Error::bad("Could not build mod export"))?;
-        writer.write_all(&bytes)?;
-    }
-    let mut file = writer
-        .finish()
-        .map_err(|_| Error::bad("Could not finish mod export"))?;
-    use std::io::Seek;
-    file.rewind()?;
-    let file = tokio::fs::File::from_std(file);
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/zip"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"factorio-mods.zip\"",
-            ),
-        ],
-        Body::from_stream(tokio_util::io::ReaderStream::new(file)),
-    )
-        .into_response())
+        writer.write_all(&serde_json::to_vec_pretty(&list)?)?;
+        if let Some(bytes) = mod_settings::read_bytes(&root.join("mod-settings.dat"))? {
+            writer
+                .start_file("mod-settings.dat", options)
+                .map_err(|_| Error::bad("Could not build mod export"))?;
+            writer.write_all(&bytes)?;
+        }
+        let mut file = writer
+            .finish()
+            .map_err(|_| Error::bad("Could not finish mod export"))?;
+        use std::io::Seek;
+        file.rewind()?;
+        let file = tokio::fs::File::from_std(file);
+        Ok((
+            [
+                (header::CONTENT_TYPE, "application/zip"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"factorio-mods.zip\"",
+                ),
+            ],
+            Body::from_stream(tokio_util::io::ReaderStream::new(file)),
+        )
+            .into_response())
+    })
+    .await
 }
 
+#[cfg(test)]
+struct ExportGate {
+    entered: tokio::sync::Notify,
+    released: std::sync::Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+#[cfg(test)]
+static EXPORT_GATE: std::sync::Mutex<Option<(PathBuf, std::sync::Arc<ExportGate>)>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+fn export_checkpoint(app: &App) -> Result<()> {
+    let gate = EXPORT_GATE
+        .lock()
+        .map_err(|_| Error::bad("Fixture gate poisoned"))?
+        .as_ref()
+        .filter(|(directory, _)| directory == &app.directory)
+        .map(|(_, gate)| gate.clone());
+    if let Some(gate) = gate {
+        let mut released = gate
+            .released
+            .lock()
+            .map_err(|_| Error::bad("Fixture gate poisoned"))?;
+        gate.entered.notify_one();
+        while !*released {
+            released = gate
+                .wake
+                .wait(released)
+                .map_err(|_| Error::bad("Fixture gate poisoned"))?;
+        }
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,7 +1576,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn interrupted_transaction_blocks_start_and_recovers_all_changes() -> Result<()> {
+    fn interrupted_transaction_recovers_before_start_validation() -> Result<()> {
         let (_temporary, app) = app()?;
         put(&app, "alpha", "1.0.0", &["base"])?;
         let revision = list(&app)?.revision;
@@ -1432,8 +1597,7 @@ mod tests {
             false,
         )?;
         storage::atomic_write(&root.join("mod-list.json"), b"{\"mods\":[]}", true)?;
-        assert!(validate_start(&app, "2.1.23").is_err());
-        recover(&app)?;
+        validate_start(&app, "2.1.23")?;
         assert_eq!(list(&app)?.revision, revision);
         assert!(!root.join("beta_1.0.0.zip").exists());
         assert!(!journal_path(&app).exists());
@@ -1501,77 +1665,80 @@ mod tests {
         Ok(())
     }
     #[tokio::test]
-    async fn pending_journal_blocks_existing_mod_and_settings_writes() -> Result<()> {
+    async fn every_existing_mod_write_recovers_without_an_unrelated_action() -> Result<()> {
         let (_temporary, app) = app()?;
         app.inner.lock().await.status.version = Some("2.1.23".into());
         put(&app, "alpha", "1.0.0", &["base"])?;
         let before = list(&app)?.revision;
         begin_transaction(&app, Vec::new(), Vec::new())?;
+        install(
+            &app,
+            &before,
+            &fixture("beta", "1.0.0", &["base"])?,
+            Some("2.1.23"),
+        )?;
+        assert!(!journal_path(&app).exists());
+        let revision = list(&app)?.revision;
+        begin_transaction(&app, Vec::new(), Vec::new())?;
+        let disabled = set_enabled(
+            State(app.clone()),
+            Path("alpha".into()),
+            Ok(Json(ModEnabledRequest {
+                revision,
+                enabled: false,
+            })),
+        )
+        .await?;
+        assert!(!journal_path(&app).exists());
         assert!(
-            install(
-                &app,
-                &before,
-                &fixture("beta", "1.0.0", &["base"])?,
-                Some("2.1.23")
-            )
-            .is_err()
+            disabled
+                .0
+                .mods
+                .iter()
+                .any(|item| item.name == "alpha" && !item.enabled)
         );
-        assert_eq!(
-            set_enabled(
-                State(app.clone()),
-                Path("alpha".into()),
-                Ok(Json(ModEnabledRequest {
-                    revision: before.clone(),
-                    enabled: false
-                }))
-            )
-            .await
-            .err()
-            .map(|error| error.status),
-            Some(StatusCode::CONFLICT)
-        );
-        assert_eq!(
-            put_mod_settings(
-                State(app.clone()),
-                Ok(Json(ModSettingsPatch {
-                    revision: "missing".into(),
-                    changes: BTreeMap::new()
-                }))
-            )
-            .await
-            .err()
-            .map(|error| error.status),
-            Some(StatusCode::CONFLICT)
-        );
+        begin_transaction(&app, Vec::new(), Vec::new())?;
         let mut headers = HeaderMap::new();
         headers.insert(
             header::IF_MATCH,
             header::HeaderValue::from_static("missing"),
         );
-        assert_eq!(
-            upload_settings(State(app.clone()), headers, Ok(Bytes::from(settings(true))))
-                .await
-                .err()
-                .map(|error| error.status),
-            Some(StatusCode::CONFLICT)
-        );
-        assert_eq!(
-            save_sync::apply(
-                State(app.clone()),
-                Path("fixture.zip".into()),
-                Ok(Json(save_sync::SyncRequest {
-                    revision: "stale".into(),
-                    operation_id: Some("journal-test".into())
-                }))
-            )
-            .await
-            .err()
-            .map(|error| error.status),
-            Some(StatusCode::CONFLICT)
-        );
-        recover(&app)?;
-        assert_eq!(list(&app)?.revision, before);
-        assert!(!directory(&app)?.join("mod-settings.dat").exists());
+        let uploaded =
+            upload_settings(State(app.clone()), headers, Ok(Bytes::from(settings(true)))).await?;
+        assert!(!journal_path(&app).exists());
+        let revision = mod_settings::read(&directory(&app)?.join("mod-settings.dat"))?.revision;
+        begin_transaction(&app, Vec::new(), Vec::new())?;
+        let updated = put_mod_settings(
+            State(app.clone()),
+            Ok(Json(ModSettingsPatch {
+                revision,
+                changes: BTreeMap::new(),
+            })),
+        )
+        .await?;
+        assert!(!journal_path(&app).exists());
+        assert_eq!(uploaded.0.revision, updated.0.revision);
+        Ok(())
+    }
+    #[test]
+    fn restart_recovers_before_serving_and_discards_only_sync_staging() -> Result<()> {
+        let (temporary, app) = app()?;
+        put(&app, "alpha", "1.0.0", &["base"])?;
+        begin_transaction(&app, vec!["beta_1.0.0.zip".into()], Vec::new())?;
+        storage::atomic_write(
+            &directory(&app)?.join("beta_1.0.0.zip"),
+            &fixture("beta", "1.0.0", &["base"])?,
+            false,
+        )?;
+        fs::create_dir(directory(&app)?.join(".sync-crashed"))?;
+        fs::create_dir(app.directory.join(".sync-crashed"))?;
+        let restarted = App::new(temporary.path().into(), None)?;
+        assert!(!journal_path(&restarted).exists());
+        assert_eq!(list(&restarted)?.mods.len(), 1);
+        assert!(!directory(&restarted)?.join(".sync-crashed").exists());
+        assert!(!restarted.directory.join(".sync-crashed").exists());
+        storage::atomic_write(&journal_path(&restarted), b"{invalid", false)?;
+        assert!(App::new(temporary.path().into(), None).is_err());
         Ok(())
     }
     #[tokio::test]
@@ -1656,6 +1823,131 @@ mod tests {
         )
         .await?;
         assert!(!path.exists());
+        Ok(())
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_export_keeps_http_runtime_and_stdout_responsive()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use axum::{body::Body, http::Request};
+        use std::{os::unix::fs::PermissionsExt, sync::Arc, time::Instant};
+        use tower::ServiceExt;
+        let temporary = tempfile::tempdir()?;
+        let binary = temporary.path().join("fake-factorio");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'Version: 2.1.23 (build 1, linux64, headless)'; exit 0; fi\necho 'ServerMultiplayerManager to(InGame)'\nwhile true; do echo heartbeat; sleep 0.01; done\n",
+        )?;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))?;
+        let app = App::new(temporary.path().join("data"), Some(binary))
+            .map_err(|error| std::io::Error::other(error.message))?;
+        app.inner.lock().await.status.version = Some("2.1.23".into());
+        put(&app, "alpha", "1.0.0", &["base"])
+            .map_err(|error| std::io::Error::other(error.message))?;
+        fs::write(app.saves_path().join("world.zip"), b"synthetic fixture")?;
+        let router = crate::test_support::authenticated(
+            crate::api::router(app.clone(), &temporary.path().join("static")),
+            &app.directory,
+        )
+        .await?;
+        crate::process::start(&app, "world.zip")
+            .await
+            .map_err(|error| std::io::Error::other(error.message))?;
+        let gate = Arc::new(ExportGate {
+            entered: tokio::sync::Notify::new(),
+            released: std::sync::Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        });
+        *EXPORT_GATE.lock().map_err(|_| "Fixture gate poisoned")? =
+            Some((app.directory.clone(), gate.clone()));
+        let watchdog_gate = gate.clone();
+        let watchdog = std::thread::spawn(move || {
+            if let Ok(released) = watchdog_gate.released.lock()
+                && let Ok((mut released, _)) = watchdog_gate.wake.wait_timeout_while(
+                    released,
+                    Duration::from_secs(3),
+                    |released| !*released,
+                )
+            {
+                *released = true;
+                watchdog_gate.wake.notify_all();
+            }
+        });
+        let started = Instant::now();
+        let export_router = router.clone();
+        let export = tokio::spawn(async move {
+            export_router
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/mods/export")
+                        .header("host", "localhost:9400")
+                        .body(Body::empty())
+                        .map_err(|_| "Invalid fixture request")?,
+                )
+                .await
+                .map_err(|_| "Export failed")
+        });
+        gate.entered.notified().await;
+        let blocked_worker_started_promptly = started.elapsed() < Duration::from_secs(1);
+        let before = app.inner.lock().await.next_log_id;
+        let responses = tokio::time::timeout(Duration::from_millis(500), async {
+            let status = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/status")
+                        .header("host", "localhost:9400")
+                        .body(Body::empty())?,
+                )
+                .await?;
+            let telemetry = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/telemetry")
+                        .header("host", "localhost:9400")
+                        .body(Body::empty())?,
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            Ok::<_, Box<dyn std::error::Error>>((
+                status.status(),
+                telemetry.status(),
+                app.inner.lock().await.next_log_id > before,
+            ))
+        })
+        .await;
+        *gate.released.lock().map_err(|_| "Fixture gate poisoned")? = true;
+        gate.wake.notify_all();
+        watchdog.join().map_err(|_| "Watchdog failed")?;
+        let response = export.await??;
+        *EXPORT_GATE.lock().map_err(|_| "Fixture gate poisoned")? = None;
+        crate::process::force_stop(&app, true)
+            .await
+            .map_err(|error| std::io::Error::other(error.message))?;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        crate::process::poll(&app).await;
+        assert!(
+            blocked_worker_started_promptly,
+            "Export blocked the async runtime before its checkpoint"
+        );
+        let (status, telemetry, stdout_advanced) =
+            responses.map_err(|_| "HTTP runtime blocked behind export")??;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(telemetry, StatusCode::OK);
+        assert!(
+            stdout_advanced,
+            "Factorio output reader stalled behind export"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn pack_listing_ignores_entries_outside_its_owned_namespace() -> Result<()> {
+        let (_temporary, app) = app()?;
+        let root = subdirectory(&app.directory, "mod-packs")?;
+        fs::write(root.join("not a pack.json"), b"unrelated")?;
+        fs::create_dir(root.join("directory.json"))?;
+        fs::write(root.join("notes.txt"), b"unrelated")?;
+        assert!(packs(State(app)).await?.0.is_empty());
         Ok(())
     }
 }
