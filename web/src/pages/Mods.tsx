@@ -614,6 +614,7 @@ function ModWorkflows({
                                 modWorkflowApi.restorePack(
                                   document.revision,
                                   pack.name,
+                                  pack.revision,
                                 ),
                             );
                           }}
@@ -630,6 +631,7 @@ function ModWorkflows({
                                 await modWorkflowApi.deletePack(
                                   document.revision,
                                   pack.name,
+                                  pack.revision,
                                 );
                                 return undefined;
                               },

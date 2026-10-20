@@ -141,8 +141,20 @@ pub struct PackRequest {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct PackSummary {
+    pub revision: String,
     pub name: String,
     pub mods: usize,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestorePackRequest {
+    pub revision: String,
+    pub pack_revision: String,
+}
+#[derive(Deserialize)]
+pub struct PackRevisionQuery {
+    pub revision: String,
+    pub pack_revision: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct PackArchive {
@@ -838,8 +850,9 @@ pub async fn packs(State(app): State<App>) -> Result<Json<Vec<PackSummary>>> {
             .to_string_lossy()
             .trim_end_matches(".json")
             .to_owned();
-        let pack = read_pack(&app, &name)?;
+        let (pack, revision) = read_pack(&app, &name)?;
         result.push(PackSummary {
+            revision,
             name,
             mods: pack.archives.len(),
         });
@@ -847,7 +860,7 @@ pub async fn packs(State(app): State<App>) -> Result<Json<Vec<PackSummary>>> {
     result.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(result))
 }
-fn read_pack(app: &App, name: &str) -> Result<Pack> {
+fn read_pack(app: &App, name: &str) -> Result<(Pack, String)> {
     let path = pack_path(app, name)?;
     storage::ensure_regular(&path)?;
     let file = fs::File::open(path)?;
@@ -856,7 +869,25 @@ fn read_pack(app: &App, name: &str) -> Result<Pack> {
     if bytes.len() > 128 * 1024 * 1024 {
         return Err(Error::bad("Mod pack exceeds limit"));
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok((
+        serde_json::from_slice(&bytes)?,
+        format!("{:x}", Sha256::digest(&bytes)),
+    ))
+}
+fn expected_pack(app: &App, name: &str, expected: &str) -> Result<Pack> {
+    let (pack, revision) = read_pack(app, name).map_err(|error| {
+        if error.status == StatusCode::NOT_FOUND {
+            Error::conflict("Mod pack changed. Refresh packs before retrying")
+        } else {
+            error
+        }
+    })?;
+    if revision != expected {
+        return Err(Error::conflict(
+            "Mod pack changed. Refresh packs before retrying",
+        ));
+    }
+    Ok(pack)
 }
 #[utoipa::path(post,path="/api/mods/packs",request_body=PackRequest,responses((status=200,body=Vec<PackSummary>)))]
 pub async fn create_pack(
@@ -902,34 +933,35 @@ pub async fn create_pack(
     }
     packs(State(app)).await
 }
-#[utoipa::path(delete,path="/api/mods/packs/{name}",params(("name"=String,Path),("revision"=String,Query)),responses((status=200,body=Vec<PackSummary>)))]
+#[utoipa::path(delete,path="/api/mods/packs/{name}",params(("name"=String,Path),("revision"=String,Query),("pack_revision"=String,Query)),responses((status=200,body=Vec<PackSummary>)))]
 pub async fn delete_pack(
     State(app): State<App>,
     Path(name): Path<String>,
-    Query(query): Query<RevisionQuery>,
+    Query(query): Query<PackRevisionQuery>,
 ) -> Result<Json<Vec<PackSummary>>> {
     {
         let inner = app.inner.lock().await;
         stopped(&inner)?;
         current(&app, &query.revision)?;
+        expected_pack(&app, &name, &query.pack_revision)?;
         let path = pack_path(&app, &name)?;
         storage::ensure_regular(&path)?;
         fs::remove_file(path)?;
     }
     packs(State(app)).await
 }
-#[utoipa::path(post,path="/api/mods/packs/{name}/restore",params(("name"=String,Path)),request_body=RevisionRequest,responses((status=200,body=ModsDocument)))]
+#[utoipa::path(post,path="/api/mods/packs/{name}/restore",params(("name"=String,Path)),request_body=RestorePackRequest,responses((status=200,body=ModsDocument)))]
 pub async fn restore_pack(
     State(app): State<App>,
     Path(name): Path<String>,
-    input: std::result::Result<Json<RevisionRequest>, JsonRejection>,
+    input: std::result::Result<Json<RestorePackRequest>, JsonRejection>,
 ) -> Result<Json<ModsDocument>> {
     let input = json(input)?;
     let inner = app.inner.lock().await;
     stopped(&inner)?;
     recover(&app)?;
     current(&app, &input.revision)?;
-    let pack = read_pack(&app, &name)?;
+    let pack = expected_pack(&app, &name, &input.pack_revision)?;
     let root = directory(&app)?;
     if pack.archives.len() > MAX_MODS
         || pack
@@ -1332,7 +1364,8 @@ mod tests {
         let _ = restore_pack(
             State(app.clone()),
             Path("original".into()),
-            Ok(Json(RevisionRequest {
+            Ok(Json(RestorePackRequest {
+                pack_revision: read_pack(&app, "original")?.1,
                 revision: list(&app)?.revision,
             })),
         )
@@ -1365,7 +1398,8 @@ mod tests {
             restore_pack(
                 State(app.clone()),
                 Path("original".into()),
-                Ok(Json(RevisionRequest {
+                Ok(Json(RestorePackRequest {
+                    pack_revision: read_pack(&app, "original")?.1,
                     revision: before.clone()
                 }))
             )
@@ -1453,7 +1487,10 @@ mod tests {
         let result = restore_pack(
             State(app.clone()),
             Path("original".into()),
-            Ok(Json(RevisionRequest { revision: before })),
+            Ok(Json(RestorePackRequest {
+                pack_revision: read_pack(&app, "original")?.1,
+                revision: before,
+            })),
         )
         .await;
         assert_eq!(
@@ -1535,6 +1572,90 @@ mod tests {
         recover(&app)?;
         assert_eq!(list(&app)?.revision, before);
         assert!(!directory(&app)?.join("mod-settings.dat").exists());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn stale_pack_restore_and_delete_reject_replaced_or_edited_snapshot() -> Result<()> {
+        let (_temporary, app) = app()?;
+        app.inner.lock().await.status.version = Some("2.1.23".into());
+        put(&app, "alpha", "1.0.0", &["base"])?;
+        let summaries = create_pack(
+            State(app.clone()),
+            Ok(Json(PackRequest {
+                revision: list(&app)?.revision,
+                name: "original".into(),
+            })),
+        )
+        .await?
+        .0;
+        let original = summaries
+            .first()
+            .ok_or_else(|| Error::bad("Missing snapshot summary"))?
+            .revision
+            .clone();
+        let revision = list(&app)?.revision;
+        let path = pack_path(&app, "original")?;
+        let (mut pack, _) = read_pack(&app, "original")?;
+        for replaced in [true, false] {
+            let expected = if replaced {
+                original.clone()
+            } else {
+                read_pack(&app, "original")?.1
+            };
+            if replaced {
+                fs::remove_file(&path)?;
+                pack.list
+                    .mods
+                    .iter_mut()
+                    .filter(|item| item.name == "alpha")
+                    .for_each(|item| item.enabled = false);
+            }
+            let mut bytes = serde_json::to_vec(&pack)?;
+            if !replaced {
+                bytes.push(b'\n');
+            }
+            storage::atomic_write(&path, &bytes, !replaced)?;
+            let restore = restore_pack(
+                State(app.clone()),
+                Path("original".into()),
+                Ok(Json(RestorePackRequest {
+                    revision: revision.clone(),
+                    pack_revision: expected.clone(),
+                })),
+            )
+            .await;
+            assert_eq!(
+                restore.err().map(|error| error.status),
+                Some(StatusCode::CONFLICT)
+            );
+            let delete = delete_pack(
+                State(app.clone()),
+                Path("original".into()),
+                Query(PackRevisionQuery {
+                    revision: revision.clone(),
+                    pack_revision: expected,
+                }),
+            )
+            .await;
+            assert_eq!(
+                delete.err().map(|error| error.status),
+                Some(StatusCode::CONFLICT)
+            );
+            assert_eq!(fs::read(&path)?, bytes);
+            assert_eq!(list(&app)?.revision, revision);
+            assert!(!journal_path(&app).exists());
+        }
+        let pack_revision = read_pack(&app, "original")?.1;
+        let _ = delete_pack(
+            State(app.clone()),
+            Path("original".into()),
+            Query(PackRevisionQuery {
+                revision,
+                pack_revision,
+            }),
+        )
+        .await?;
+        assert!(!path.exists());
         Ok(())
     }
 }

@@ -10,6 +10,7 @@ export const modListFileSchema = z.object({
   mods: z.array(listEntrySchema).max(500),
 });
 const packSchema = z.object({
+  revision: z.string(),
   name: z.string(),
   mods: z.number().int().nonnegative(),
 });
@@ -95,13 +96,14 @@ export const modWorkflowApi = {
   packs: () => request("/packs", z.array(packSchema)),
   createPack: (revision: string, name: string) =>
     request("/packs", z.array(packSchema), "POST", { revision, name }),
-  restorePack: (revision: string, name: string) =>
+  restorePack: (revision: string, name: string, packRevision: string) =>
     request(`/packs/${encodeURIComponent(name)}/restore`, modsSchema, "POST", {
       revision,
+      pack_revision: packRevision,
     }),
-  deletePack: (revision: string, name: string) =>
+  deletePack: (revision: string, name: string, packRevision: string) =>
     request(
-      `/packs/${encodeURIComponent(name)}${query(revision)}`,
+      `/packs/${encodeURIComponent(name)}${query(revision)}&pack_revision=${encodeURIComponent(packRevision)}`,
       z.array(packSchema),
       "DELETE",
     ),

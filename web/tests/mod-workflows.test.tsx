@@ -158,7 +158,7 @@ it("shows dependency errors without reporting partial update success", async () 
 });
 it("requires confirmation to restore a snapshot and keeps the table compact", async () => {
   vi.spyOn(modWorkflowApi, "packs").mockResolvedValue([
-    { name: "working", mods: 1 },
+    { name: "working", mods: 1, revision: "pack-one" },
   ]);
   const restore = vi
     .spyOn(modWorkflowApi, "restorePack")
@@ -176,7 +176,7 @@ it("requires confirmation to restore a snapshot and keeps the table compact", as
   expect(restore).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => {
-    expect(restore).toHaveBeenCalledWith("mods-one", "working");
+    expect(restore).toHaveBeenCalledWith("mods-one", "working", "pack-one");
   });
 });
 it("disables mutations while running and leaves exports available", async () => {
