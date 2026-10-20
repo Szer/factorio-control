@@ -454,6 +454,7 @@ async fn apply_impl(
     let plan = {
         let inner = app.inner.lock().await;
         stopped(&inner)?;
+        workflows::ensure_consistent(app)?;
         let (plan, _, _) = build_plan(app, name, known_engine(&inner)?)?;
         if plan.revision != input.revision {
             return Err(Error::conflict(
@@ -512,6 +513,7 @@ async fn apply_impl(
     progress.update(SyncPhase::Validating, completed, total, None)?;
     let inner = app.inner.lock().await;
     stopped(&inner)?;
+    workflows::ensure_consistent(app)?;
     let (fresh, mut archives, old) = build_plan(app, name, known_engine(&inner)?)?;
     if fresh.revision != plan.revision {
         return Err(Error::conflict(

@@ -17,8 +17,10 @@ import type {
   ModUpdates,
   Status,
 } from "../api";
-import { Loading, Notice } from "../components/ui";
+import { Loading, Notice, Modal } from "../components/ui";
 import { useUnsavedChanges } from "../useUnsavedChanges";
+import { modWorkflowApi, modListFileSchema } from "../modWorkflowApi";
+import "../mod-workflows.css";
 
 function releaseDate(value: string | null | undefined): string {
   if (!value) return "—";
@@ -251,6 +253,528 @@ function InstalledModsTable({
   );
 }
 
+function ModWorkflows({
+  document,
+  stopped,
+}: {
+  document: ModsDocument;
+  stopped: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<"portal" | "bulk" | "packs" | "files">(
+    "portal",
+  );
+  const [term, setTerm] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selected, setSelected] = useState("");
+  const [target, setTarget] = useState("");
+  const [packName, setPackName] = useState("");
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<{
+    label: string;
+    run: () => Promise<ModsDocument | undefined>;
+  } | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const client = useQueryClient();
+  const changing = useIsMutating({ mutationKey: ["mod-change"] }) > 0;
+  const search = useQuery({
+    queryKey: ["mod-portal-search", searchTerm],
+    queryFn: () => modWorkflowApi.search(searchTerm),
+    enabled: open && tab === "portal" && searchTerm.length > 0,
+    retry: false,
+    staleTime: 60000,
+  });
+  const releases = useQuery({
+    queryKey: ["mod-portal-releases", selected],
+    queryFn: () => modWorkflowApi.releases(selected),
+    enabled: open && tab === "portal" && selected.length > 0,
+    retry: false,
+    staleTime: 60000,
+  });
+  const packs = useQuery({
+    queryKey: ["mod-packs"],
+    queryFn: modWorkflowApi.packs,
+    enabled: open && tab === "packs",
+  });
+  const preview = useMutation({
+    mutationFn: () => modWorkflowApi.preview(document.revision),
+  });
+  const action = useMutation({
+    mutationKey: ["mod-change"],
+    mutationFn: (run: () => Promise<ModsDocument | undefined>) => run(),
+    onSuccess: async (result) => {
+      if (result) client.setQueryData(["mods"], result);
+      setConfirmation(null);
+      preview.reset();
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["mods"] }),
+        client.invalidateQueries({ queryKey: ["mod-settings"] }),
+        client.invalidateQueries({ queryKey: ["mod-packs"] }),
+        client.invalidateQueries({ queryKey: ["mod-updates"] }),
+      ]);
+    },
+  });
+  const progress = useQuery({
+    queryKey: ["mod-operation-progress"],
+    queryFn: modWorkflowApi.progress,
+    enabled: open && action.isPending,
+    refetchInterval: action.isPending ? 500 : false,
+    retry: false,
+  });
+  function confirm(
+    label: string,
+    run: () => Promise<ModsDocument | undefined>,
+  ) {
+    action.reset();
+    setConfirmation({ label, run });
+  }
+  const disabled = !stopped || changing;
+  const version = target || releases.data?.releases[0]?.version || "";
+  const installed = document.mods.find((item) => item.name === selected);
+  return (
+    <>
+      <button
+        className="button secondary"
+        onClick={() => {
+          setOpen(true);
+        }}
+      >
+        Manage mods
+      </button>
+      {open && (
+        <Modal
+          title="Manage mods"
+          className="mod-workflow-dialog"
+          close={() => {
+            setOpen(false);
+            setConfirmation(null);
+          }}
+          busy={action.isPending}
+        >
+          <div className="mod-workflow-body">
+            <div className="tab-buttons">
+              {(
+                [
+                  ["portal", "Portal"],
+                  ["bulk", "Bulk update"],
+                  ["packs", "Mod packs"],
+                  ["files", "Files & removal"],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  className={`button ${tab === key ? "primary" : "secondary"}`}
+                  disabled={action.isPending}
+                  onClick={() => {
+                    setTab(key);
+                    setConfirmation(null);
+                    action.reset();
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {!stopped && (
+              <p className="muted">Stop the server before making changes.</p>
+            )}
+            {tab === "portal" && (
+              <>
+                <form
+                  className="toolbar"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    setSearchTerm(term.trim());
+                    setSelected("");
+                    setTarget("");
+                  }}
+                >
+                  <input
+                    type="text"
+                    aria-label="Search mod portal"
+                    value={term}
+                    maxLength={100}
+                    onChange={(event) => {
+                      setTerm(event.target.value);
+                    }}
+                    placeholder="Search mods…"
+                  />
+                  <button
+                    className="button secondary"
+                    disabled={!term.trim() || search.isFetching}
+                  >
+                    Search
+                  </button>
+                </form>
+                {search.isFetching && <p role="status">Searching portal…</p>}
+                {search.isError && (
+                  <Notice>{errorMessage(search.error)}</Notice>
+                )}
+                {search.data && !selected && (
+                  <div className="mod-workflow-list">
+                    {search.data.length === 0 ? (
+                      <p>No matching mods.</p>
+                    ) : (
+                      search.data.map((item) => (
+                        <div key={item.name} className="mod-workflow-entry">
+                          <strong>{item.title || item.name}</strong>
+                          <button
+                            className="button secondary"
+                            onClick={() => {
+                              setSelected(item.name);
+                              setTarget("");
+                            }}
+                          >
+                            Choose version
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+                <label>
+                  Mod{" "}
+                  <select
+                    aria-label="Installed mod versions"
+                    value={selected}
+                    onChange={(event) => {
+                      setSelected(event.target.value);
+                      setTarget("");
+                    }}
+                  >
+                    <option value="">Select installed mod…</option>
+                    {selected && !installed && (
+                      <option value={selected}>{selected}</option>
+                    )}
+                    {document.mods.map((item) => (
+                      <option key={item.name} value={item.name}>
+                        {item.title || item.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {releases.isFetching && selected && (
+                  <p role="status">Loading compatible releases…</p>
+                )}
+                {releases.isError && (
+                  <Notice>{errorMessage(releases.error)}</Notice>
+                )}
+                {selected && releases.data && (
+                  <div className="toolbar">
+                    <label>
+                      Version{" "}
+                      <select
+                        aria-label="Portal release"
+                        value={version}
+                        onChange={(event) => {
+                          setTarget(event.target.value);
+                        }}
+                      >
+                        {releases.data.releases.map((item) => (
+                          <option key={item.version} value={item.version}>
+                            {item.version} · {releaseDate(item.released_at)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      className="button primary"
+                      disabled={
+                        disabled ||
+                        !document.portal_authenticated ||
+                        !version ||
+                        installed?.version === version
+                      }
+                      onClick={() => {
+                        confirm(
+                          `Install ${selected} ${version}${installed ? ` (currently ${installed.version})` : ""}? Existing versions are retained.`,
+                          () =>
+                            modWorkflowApi.install(
+                              document.revision,
+                              selected,
+                              version,
+                            ),
+                        );
+                      }}
+                    >
+                      Install version
+                    </button>
+                  </div>
+                )}
+                {selected && releases.data?.releases.length === 0 && (
+                  <p>No releases support this Factorio version.</p>
+                )}
+              </>
+            )}
+            {tab === "bulk" && (
+              <>
+                <button
+                  className="button secondary"
+                  disabled={disabled || preview.isPending}
+                  onClick={() => {
+                    preview.mutate();
+                  }}
+                >
+                  {" "}
+                  {preview.isPending
+                    ? "Checking compatible upgrades…"
+                    : "Preview upgrades"}
+                </button>
+                {preview.isError && (
+                  <Notice>{errorMessage(preview.error)}</Notice>
+                )}
+                {preview.data && (
+                  <>
+                    <div className="mod-workflow-list">
+                      {preview.data.changes.length === 0 ? (
+                        <p>All installed mods are up to date.</p>
+                      ) : (
+                        preview.data.changes.map((item) => (
+                          <div className="mod-workflow-entry" key={item.name}>
+                            <strong>{item.name}</strong>
+                            <span>
+                              {item.current_version} → {item.version}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    <button
+                      className="button primary"
+                      disabled={
+                        disabled ||
+                        !preview.data.changes.length ||
+                        !document.portal_authenticated ||
+                        preview.data.revision !== document.revision
+                      }
+                      onClick={() => {
+                        const plan = preview.data;
+                        confirm(
+                          `Apply ${String(plan.changes.length)} upgrades together? All downloads and dependencies are checked before activation.`,
+                          () => modWorkflowApi.apply(plan),
+                        );
+                      }}
+                    >
+                      Apply upgrades
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+            {tab === "packs" && (
+              <>
+                <form
+                  className="toolbar"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    action.mutate(async () => {
+                      await modWorkflowApi.createPack(
+                        document.revision,
+                        packName,
+                      );
+                      setPackName("");
+                      return undefined;
+                    });
+                  }}
+                >
+                  <input
+                    type="text"
+                    aria-label="Pack name"
+                    value={packName}
+                    maxLength={64}
+                    pattern="[A-Za-z0-9_-]+"
+                    required
+                    placeholder="Pack name"
+                    onChange={(event) => {
+                      setPackName(event.target.value);
+                    }}
+                  />
+                  <button
+                    className="button primary"
+                    disabled={disabled || !packName}
+                  >
+                    Snapshot current mods
+                  </button>
+                </form>
+                {packs.isError && <Notice>{errorMessage(packs.error)}</Notice>}
+                <div className="mod-workflow-list">
+                  {packs.data?.map((pack) => (
+                    <div key={pack.name} className="mod-workflow-entry">
+                      <strong>
+                        {pack.name} · {pack.mods} mods
+                      </strong>
+                      <div className="toolbar">
+                        <button
+                          className="button secondary"
+                          disabled={disabled}
+                          onClick={() => {
+                            confirm(
+                              `Restore ${pack.name}? Active versions, enabled states and startup settings will match the snapshot.`,
+                              () =>
+                                modWorkflowApi.restorePack(
+                                  document.revision,
+                                  pack.name,
+                                ),
+                            );
+                          }}
+                        >
+                          Restore
+                        </button>
+                        <button
+                          className="button secondary"
+                          disabled={disabled}
+                          onClick={() => {
+                            confirm(
+                              `Delete snapshot ${pack.name}? Stored mod archives are retained.`,
+                              async () => {
+                                await modWorkflowApi.deletePack(
+                                  document.revision,
+                                  pack.name,
+                                );
+                                return undefined;
+                              },
+                            );
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {packs.data?.length === 0 && <p>No mod packs yet.</p>}
+              </>
+            )}
+            {tab === "files" && (
+              <>
+                <div className="toolbar">
+                  <a
+                    className="button secondary"
+                    href="/api/mods/export"
+                    download="factorio-mods.zip"
+                  >
+                    Download all mods
+                  </a>
+                  <a
+                    className="button secondary"
+                    href="/api/mods/list"
+                    download="mod-list.json"
+                  >
+                    Export mod list
+                  </a>
+                  <button
+                    className="button secondary"
+                    disabled={disabled}
+                    onClick={() => {
+                      input.current?.click();
+                    }}
+                  >
+                    Import mod list
+                  </button>
+                </div>
+                <input
+                  ref={input}
+                  type="file"
+                  accept=".json,application/json"
+                  className="visually-hidden"
+                  aria-label="Import mod list file"
+                  disabled={disabled}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = "";
+                    setFileError(null);
+                    if (file) {
+                      if (file.size > 1024 * 1024)
+                        setFileError("Mod list must be at most 1 MB.");
+                      else {
+                        file
+                          .text()
+                          .then((text) => {
+                            const value: unknown = JSON.parse(text);
+                            const result = modListFileSchema.parse(value);
+                            confirm(
+                              `Apply enabled states and installed versions from ${file.name}? Missing dependencies or ZIPs will prevent changes.`,
+                              () =>
+                                modWorkflowApi.importList(
+                                  document.revision,
+                                  result,
+                                ),
+                            );
+                          })
+                          .catch((error: unknown) => {
+                            setFileError(errorMessage(error));
+                          });
+                      }
+                    }
+                  }}
+                />
+                {fileError && <Notice>{fileError}</Notice>}
+                <div className="mod-workflow-list">
+                  {document.mods.map((item) => (
+                    <div key={item.name} className="mod-workflow-entry">
+                      <strong>{item.title || item.name}</strong>
+                      <button
+                        className="button secondary"
+                        disabled={disabled}
+                        onClick={() => {
+                          confirm(
+                            `Remove ${item.title || item.name}? Dependent mods must remain valid. ZIPs are archived for pack restoration.`,
+                            () =>
+                              modWorkflowApi.remove(
+                                document.revision,
+                                item.name,
+                              ),
+                          );
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+            {action.isPending && (
+              <p role="status">
+                {progress.data?.active
+                  ? `${progress.data.stage} · ${String(progress.data.completed)}/${String(progress.data.total)}${progress.data.current ? ` · ${progress.data.current}` : ""}`
+                  : "Preparing and validating changes…"}
+              </p>
+            )}
+            {action.isError && <Notice>{errorMessage(action.error)}</Notice>}
+            {action.isSuccess && <Notice success>Changes applied.</Notice>}
+            {confirmation && (
+              <div className="mod-workflow-confirm">
+                <p>{confirmation.label}</p>
+                <div className="toolbar">
+                  <button
+                    className="button primary"
+                    disabled={disabled}
+                    onClick={() => {
+                      action.mutate(confirmation.run);
+                    }}
+                  >
+                    {action.isPending ? "Applying…" : "Confirm"}
+                  </button>
+                  <button
+                    className="button secondary"
+                    disabled={action.isPending}
+                    onClick={() => {
+                      setConfirmation(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
 function StartupEditor({
   initial,
   stopped,
@@ -269,6 +793,7 @@ function StartupEditor({
     setBaseline(result);
     setDraft(result.settings);
     client.setQueryData(["mod-settings"], result);
+    client.invalidateQueries({ queryKey: ["mods"] }).catch(() => undefined);
   }
   const save = useMutation({
     mutationFn: api.saveModSettings,
@@ -611,6 +1136,9 @@ export default function Mods({
       )}
       <div hidden={tab !== "mods"}>
         <div className="toolbar">
+          {query.data && (
+            <ModWorkflows document={query.data} stopped={stopped} />
+          )}
           <button
             className="button secondary"
             disabled={checking || !query.data?.mods.length}

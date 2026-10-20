@@ -419,6 +419,12 @@ async fn routes_require_revisions_and_stopped_server_and_roundtrip_downloads() -
         &to_bytes(downloaded.into_body(), 1024 * 1024).await?[..],
         &fixture()
     );
+    let refreshed = router
+        .clone()
+        .oneshot(Request::builder().uri("/mods").body(Body::empty())?)
+        .await?;
+    let document: mods::ModsDocument =
+        serde_json::from_slice(&to_bytes(refreshed.into_body(), 1024 * 1024).await?)?;
     let unauthenticated = router
         .oneshot(
             Request::builder()

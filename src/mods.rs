@@ -1,5 +1,7 @@
 #[path = "save_sync.rs"]
 pub mod save_sync;
+#[path = "mod_workflows.rs"]
+pub mod workflows;
 use crate::{
     App, Error, Result,
     mod_settings::{self, ModSettingsDocument, ModSettingsPatch},
@@ -419,6 +421,9 @@ pub fn list(app: &App) -> Result<ModsDocument> {
     let (mod_list, revision) = read_list(&path)?;
     let mut hash = Sha256::new();
     hash.update(revision.as_bytes());
+    if let Some(settings) = mod_settings::read_bytes(&path.join("mod-settings.dat"))? {
+        hash.update(Sha256::digest(&settings));
+    }
     let mut files = Vec::new();
     for item in fs::read_dir(&path)? {
         let item = item?;
@@ -497,6 +502,7 @@ fn stopped(inner: &crate::Inner) -> Result<()> {
     Ok(())
 }
 fn current(app: &App, revision: &str) -> Result<ModsDocument> {
+    workflows::ensure_consistent(app)?;
     let document = list(app)?;
     if document.revision != revision {
         return Err(Error::conflict("Mods changed. Reload before saving"));
@@ -686,6 +692,7 @@ fn check_dependencies(
     Ok(())
 }
 pub fn validate_start(app: &App, engine: &str) -> Result<()> {
+    workflows::ensure_consistent(app)?;
     let document = list(app)?;
     let (mod_list, _) = read_list(&directory(app)?)?;
     let bundled = bundled_mods(app)?;
@@ -794,6 +801,7 @@ fn expected(headers: &HeaderMap) -> Result<&str> {
 }
 pub fn routes() -> Router<App> {
     Router::new()
+        .merge(workflows::routes())
         .route("/saves/{name}/mods", get(save_sync::plan))
         .route(
             "/saves/{name}/mods/sync",
@@ -918,6 +926,7 @@ pub async fn put_mod_settings(
     let input = json(input)?;
     let inner = app.inner.lock().await;
     stopped(&inner)?;
+    workflows::ensure_consistent(&app)?;
     Ok(Json(mod_settings::update(
         &directory(&app)?.join("mod-settings.dat"),
         input,
@@ -954,6 +963,7 @@ pub async fn upload_settings(
     let bytes = body(bytes)?;
     let inner = app.inner.lock().await;
     stopped(&inner)?;
+    workflows::ensure_consistent(&app)?;
     Ok(Json(mod_settings::replace(
         &directory(&app)?.join("mod-settings.dat"),
         expected(&headers)?,

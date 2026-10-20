@@ -1,0 +1,73 @@
+.mod-workflow-dialog {
+  width: min(820px, calc(100vw - 32px));
+}
+.mod-workflow-body {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+.mod-workflow-body .tab-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mod-workflow-body .toolbar {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.mod-workflow-body input[type="text"] {
+  max-width: 28rem;
+}
+.mod-workflow-body select {
+  max-width: 100%;
+}
+.mod-workflow-list {
+  display: grid;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+}
+.mod-workflow-entry {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+  background: #292929;
+}
+.mod-workflow-entry .button {
+  min-height: 34px;
+  padding: 5px 10px;
+}
+.mod-workflow-entry strong {
+  overflow-wrap: anywhere;
+}
+.mod-workflow-confirm {
+  border: 1px solid #dd9a2c;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+.mod-workflow-confirm p {
+  margin: 0;
+}
+.mod-workflow-body .muted {
+  margin: 0;
+}
+.mod-manage-row {
+  opacity: 0.8;
+}
+.mod-workflow-body table {
+  width: 100%;
+}
+@media (max-width: 600px) {
+  .mod-workflow-dialog {
+    width: calc(100vw - 16px);
+  }
+  .mod-workflow-body {
+    padding: 12px;
+  }
+}
