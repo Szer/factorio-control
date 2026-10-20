@@ -73,7 +73,12 @@ function mount(element: ReactElement) {
 }
 beforeEach(() => {
   vi.spyOn(authApi, "status").mockResolvedValue({
-    user: { username: "owner", role: "admin", must_change_password: false },
+    user: {
+      username: "owner",
+      account_id: "fixture-owner",
+      role: "admin",
+      must_change_password: false,
+    },
     expires_at: null,
   });
   Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
@@ -103,6 +108,7 @@ describe("settings and administrators", () => {
       revision: "one",
       settings: {
         poll_interval_seconds: 2,
+        use_server_whitelist: false,
         ups_history_minutes: 10,
         enable_script_telemetry: false,
         game_bind_address: "0.0.0.0",
@@ -141,6 +147,7 @@ describe("settings and administrators", () => {
       revision: "one",
       settings: {
         poll_interval_seconds: 2,
+        use_server_whitelist: false,
         ups_history_minutes: 10,
         enable_script_telemetry: false,
         game_bind_address: "0.0.0.0",
@@ -201,6 +208,7 @@ describe("settings and administrators", () => {
       revision: "one",
       settings: {
         poll_interval_seconds: 2,
+        use_server_whitelist: false,
         ups_history_minutes: 10,
         enable_script_telemetry: false,
         game_bind_address: "0.0.0.0",
@@ -425,6 +433,7 @@ it("edits manager JSON separately, validates unknown keys, and preserves form ch
   vi.spyOn(api, "admins").mockResolvedValue({ revision: "one", admins: [] });
   const preferences = {
     poll_interval_seconds: 2,
+    use_server_whitelist: false,
     ups_history_minutes: 10,
     enable_script_telemetry: false,
     game_bind_address: "0.0.0.0",

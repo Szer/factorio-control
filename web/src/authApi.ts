@@ -5,6 +5,7 @@ import type { components } from "./api.generated";
 export const roleSchema = z.enum(["admin", "operator", "viewer"]);
 export type Role = z.infer<typeof roleSchema>;
 export const accountSchema = z.object({
+  account_id: z.string().min(1),
   username: z.string(),
   role: roleSchema,
   must_change_password: z.boolean(),
@@ -22,6 +23,7 @@ export const accountsSchema = z.object({
 export type AccountsDocument = z.infer<typeof accountsSchema>;
 export const authKey = ["auth"] as const;
 export const authEvent = "fc-auth-expired";
+export const authDiscardEvent = "fc-auth-discard";
 export const AuthContext = createContext<SessionStatus>({
   user: null,
   expires_at: null,
@@ -69,9 +71,16 @@ async function request<T>(
       parsed.success ? parsed.data.message : "Account request failed",
     );
   }
-  return schema.parse(
-    response.status === 204 ? undefined : await response.json(),
+  const parsed = schema.safeParse(
+    response.status === 204
+      ? undefined
+      : await response.json().catch(() => null),
   );
+  if (!parsed.success)
+    throw new Error(
+      "The server returned an unexpected account response. Refresh and try again.",
+    );
+  return parsed.data;
 }
 
 export const authApi = {

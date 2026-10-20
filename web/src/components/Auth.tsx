@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useSessionMutation } from "../useSessionMutation";
+import { Activity, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AuthContext,
   authApi,
   authEvent,
+  authDiscardEvent,
   authExpired,
   authKey,
   roleSchema,
@@ -30,11 +32,7 @@ function Login() {
     mutationFn: () => authApi.login(username, password),
     onSuccess: async (session) => {
       setPassword("");
-      await client.cancelQueries();
-      client.removeQueries({
-        predicate: (query) => query.queryKey[0] !== "auth",
-      });
-      client.getMutationCache().clear();
+      await client.cancelQueries({ queryKey: authKey });
       client.setQueryData(authKey, session);
     },
     onError: () => {
@@ -108,71 +106,80 @@ export function AuthGate({ children }: { children: ReactNode }) {
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
-  const identity = session.data
-    ? `${session.data.user?.username ?? "signed-out"}:${session.data.user?.role ?? "none"}:${String(session.data.user?.must_change_password ?? false)}`
+  const [retained, setRetained] = useState<SessionStatus | null>(null);
+  const identity = session.data?.user
+    ? JSON.stringify(session.data.user)
     : null;
-  const [readyIdentity, setReadyIdentity] = useState<string | null>(null);
+  const retainedIdentity = retained?.user
+    ? JSON.stringify(retained.user)
+    : null;
+  const preparedIdentity = useRef<string | null | undefined>(undefined);
   useEffect(() => {
-    if (identity === null) return;
+    if (preparedIdentity.current === identity) return;
     let mounted = true;
     client
       .cancelQueries({ predicate: (query) => query.queryKey[0] !== "auth" })
       .then(() => {
         if (!mounted) return;
+        preparedIdentity.current = identity;
         client.removeQueries({
           predicate: (query) => query.queryKey[0] !== "auth",
         });
         client.getMutationCache().clear();
-        setReadyIdentity(identity);
+        if (session.data?.user) setRetained(session.data);
       })
-      .catch(() => {
-        if (mounted)
-          client.setQueryData<SessionStatus>(authKey, {
-            user: null,
-            expires_at: null,
-          });
-      });
+      .catch(() => undefined);
     return () => {
       mounted = false;
     };
-  }, [client, identity]);
+  }, [client, identity, session.data]);
   useEffect(() => {
-    let mounted = true;
     const expire = () => {
-      client
-        .cancelQueries()
-        .then(() => {
-          if (!mounted) return;
-          client.removeQueries({
-            predicate: (query) => query.queryKey[0] !== "auth",
-          });
-          client.getMutationCache().clear();
-          client.setQueryData<SessionStatus>(authKey, {
-            user: null,
-            expires_at: null,
-          });
-        })
-        .catch(() => {
-          if (mounted)
-            client.setQueryData<SessionStatus>(authKey, {
-              user: null,
-              expires_at: null,
-            });
-        });
+      client.setQueryData<SessionStatus>(authKey, {
+        user: null,
+        expires_at: null,
+      });
+    };
+    const discard = () => {
+      setRetained(null);
+      expire();
     };
     window.addEventListener(authEvent, expire);
+    window.addEventListener(authDiscardEvent, discard);
     return () => {
-      mounted = false;
       window.removeEventListener(authEvent, expire);
+      window.removeEventListener(authDiscardEvent, discard);
     };
   }, [client]);
+  const expiresAt = session.data?.expires_at;
+  useEffect(() => {
+    if (identity === null || expiresAt === null || expiresAt === undefined)
+      return;
+    const timer = window.setTimeout(
+      authExpired,
+      Math.min(Math.max(0, expiresAt * 1000 - Date.now()), 2_147_483_647),
+    );
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [identity, expiresAt]);
+  const authenticated = identity !== null && identity === retainedIdentity;
+  const suspended = retained !== null && !authenticated;
+  const protectedContent = retained?.user &&
+    !retained.user.must_change_password && (
+      <Activity mode={authenticated ? "visible" : "hidden"}>
+        <AuthContext.Provider key={retainedIdentity} value={retained}>
+          {children}
+        </AuthContext.Provider>
+      </Activity>
+    );
   if (session.isPending)
     return (
       <main className="auth-login" role="status">
         Connecting…
       </main>
     );
-  if (session.isError)
+  if (session.isError && !session.data)
     return (
       <main className="auth-login">
         <section className="panel auth-form">
@@ -188,7 +195,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
         </section>
       </main>
     );
-  if (!session.data.user) return <Login />;
+  if (!session.data.user)
+    return (
+      <>
+        {protectedContent}
+        {suspended && (
+          <p className="auth-resume">
+            Sign in with the same account to resume your unsaved edits.
+          </p>
+        )}
+        <Login />
+      </>
+    );
   if (session.data.user.must_change_password)
     return (
       <main className="auth-login">
@@ -217,16 +235,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
         </section>
       </main>
     );
-  if (readyIdentity !== identity)
-    return (
-      <main className="auth-login" role="status">
-        Connecting…
-      </main>
-    );
   return (
-    <AuthContext.Provider key={identity} value={session.data}>
-      {children}
-    </AuthContext.Provider>
+    <>
+      {protectedContent}
+      {session.isError && (
+        <p role="alert">Connection interrupted. Your edits are still here.</p>
+      )}
+      {!authenticated && (
+        <main className="auth-login" role="status">
+          Connecting…
+        </main>
+      )}
+    </>
   );
 }
 
@@ -300,6 +320,7 @@ export function SessionMenu() {
   const { user } = useAccess();
   const client = useQueryClient();
   const reset = async () => {
+    window.dispatchEvent(new Event(authDiscardEvent));
     await client.cancelQueries();
     client.removeQueries({
       predicate: (query) => query.queryKey[0] !== "auth",
@@ -370,7 +391,7 @@ function AccountEditor({
   const [role, setRole] = useState(account.role);
   const [password, setPassword] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const save = useMutation({
+  const save = useSessionMutation({
     mutationFn: () =>
       authApi.update({
         revision: document.revision,
@@ -380,14 +401,16 @@ function AccountEditor({
       }),
     onSuccess: async (result) => {
       setPassword("");
+      await client.cancelQueries({ queryKey: ["accounts"] });
       client.setQueryData(["accounts"], result);
       close();
       await client.invalidateQueries({ queryKey: authKey });
     },
   });
-  const remove = useMutation({
+  const remove = useSessionMutation({
     mutationFn: () => authApi.delete(document.revision, account.username),
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      await client.cancelQueries({ queryKey: ["accounts"] });
       client.setQueryData(["accounts"], result);
       close();
     },
@@ -477,7 +500,7 @@ export function AccountPanel() {
     enabled: canAdmin,
     retry: false,
   });
-  const create = useMutation({
+  const create = useSessionMutation({
     mutationFn: () => {
       if (!query.data) throw new Error("Reload accounts before saving");
       return authApi.create({
@@ -487,7 +510,8 @@ export function AccountPanel() {
         role,
       });
     },
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      await client.cancelQueries({ queryKey: ["accounts"] });
       client.setQueryData(["accounts"], result);
       setUsername("");
       setPassword("");

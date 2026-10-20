@@ -1,8 +1,8 @@
+import { useSessionMutation } from "../useSessionMutation";
 import { Fragment, useRef, useState } from "react";
 import {
   useIsFetching,
   useIsMutating,
-  useMutation,
   useQueries,
   useQuery,
   useQueryClient,
@@ -44,17 +44,19 @@ function ModRow({
 }) {
   const client = useQueryClient();
   const busy = useIsMutating({ mutationKey: ["mod-change"] }) > 0;
-  const enable = useMutation({
+  const enable = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: api.enableMod,
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      await client.cancelQueries({ queryKey: ["mods"] });
       client.setQueryData(["mods"], result);
     },
   });
-  const update = useMutation({
+  const update = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: api.updateMod,
     onSuccess: async (result) => {
+      await client.cancelQueries({ queryKey: ["mods"] });
       client.setQueryData(["mods"], result);
       await client.invalidateQueries({ queryKey: ["mod-settings"] });
     },
@@ -298,14 +300,17 @@ function ModWorkflows({
     queryFn: modWorkflowApi.packs,
     enabled: open && tab === "packs",
   });
-  const preview = useMutation({
+  const preview = useSessionMutation({
     mutationFn: () => modWorkflowApi.preview(document.revision),
   });
-  const action = useMutation({
+  const action = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: (run: () => Promise<ModsDocument | undefined>) => run(),
     onSuccess: async (result) => {
-      if (result) client.setQueryData(["mods"], result);
+      if (result) {
+        await client.cancelQueries({ queryKey: ["mods"] });
+        client.setQueryData(["mods"], result);
+      }
       setConfirmation(null);
       preview.reset();
       await Promise.all([
@@ -815,24 +820,25 @@ function StartupEditor({
   const client = useQueryClient();
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline.settings);
   useUnsavedChanges(dirty);
-  function receive(result: ModSettingsDocument) {
+  async function receive(result: ModSettingsDocument) {
     setBaseline(result);
     setDraft(result.settings);
+    await client.cancelQueries({ queryKey: ["mod-settings"] });
     client.setQueryData(["mod-settings"], result);
     client.invalidateQueries({ queryKey: ["mods"] }).catch(() => undefined);
   }
-  const save = useMutation({
+  const save = useSessionMutation({
     mutationFn: api.saveModSettings,
     onSuccess: receive,
   });
-  const upload = useMutation({
+  const upload = useSessionMutation({
     mutationFn: api.uploadModSettings,
     onSuccess: receive,
   });
-  const reload = useMutation({
+  const reload = useSessionMutation({
     mutationFn: api.modSettings,
-    onSuccess: (result) => {
-      receive(result);
+    onSuccess: async (result) => {
+      await receive(result);
       save.reset();
       upload.reset();
     },
@@ -1072,7 +1078,9 @@ function StartupEditor({
             className="button secondary"
             disabled={!dirty || busy}
             onClick={() => {
-              setDraft(baseline.settings);
+              setBaseline(initial);
+              setSeenRevision(initial.revision);
+              setDraft(initial.settings);
               save.reset();
             }}
           >
@@ -1128,10 +1136,11 @@ export default function Mods({
   });
   const checking = useIsFetching({ queryKey: ["mod-updates"] }) > 0;
   const changing = useIsMutating({ mutationKey: ["mod-change"] }) > 0;
-  const upload = useMutation({
+  const upload = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: api.uploadMod,
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      await client.cancelQueries({ queryKey: ["mods"] });
       client.setQueryData(["mods"], result);
       client
         .invalidateQueries({ queryKey: ["mod-settings"] })
@@ -1168,7 +1177,7 @@ export default function Mods({
       )}
       <div hidden={tab !== "mods"}>
         <div className="toolbar">
-          {query.data && (
+          {query.data && active && tab === "mods" && (
             <ModWorkflows document={query.data} stopped={stopped} />
           )}
           <button
@@ -1197,8 +1206,8 @@ export default function Mods({
               const file = event.target.files?.[0];
               setError(null);
               if (file && query.data) {
-                if (file.size > 64 * 1024 * 1024)
-                  setError("Mod ZIP uploads are limited to 64 MB.");
+                if (file.size > 1024 * 1024 * 1024)
+                  setError("Mod ZIP uploads are limited to 1 GiB.");
                 else upload.mutate({ file, revision: query.data.revision });
               }
               event.target.value = "";
@@ -1237,9 +1246,14 @@ export default function Mods({
             Mod installed. Changes apply on the next server start.
           </Notice>
         )}
+        {query.isError && query.data && (
+          <Notice>
+            {errorMessage(query.error)} Showing the last loaded mods.
+          </Notice>
+        )}
         {query.isPending ? (
           <Loading />
-        ) : query.isError ? (
+        ) : !query.data ? (
           <Notice>{errorMessage(query.error)}</Notice>
         ) : (
           <>

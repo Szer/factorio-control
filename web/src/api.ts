@@ -75,6 +75,7 @@ export const managerSchema = z.object({
     ups_history_minutes: z.number().int().min(1).max(1440),
     enable_script_telemetry: z.boolean(),
     game_bind_address: z.string().default("0.0.0.0"),
+    use_server_whitelist: z.boolean().default(false),
     game_port: z.number().int().min(1).max(65535).default(34197),
   }),
 }) satisfies z.ZodType<components["schemas"]["ManagerSettingsDocument"]>;

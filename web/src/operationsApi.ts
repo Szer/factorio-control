@@ -40,7 +40,13 @@ async function request<T>(
       response.status,
     );
   }
-  return schema.parse(value);
+  const parsed = schema.safeParse(value);
+  if (!parsed.success)
+    throw new ApiError(
+      "The server returned an unexpected response. Refresh and try again.",
+      response.status,
+    );
+  return parsed.data;
 }
 const runtimePathsSchema = z.object({
   manager_data: z.string(),

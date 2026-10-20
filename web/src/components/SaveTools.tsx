@@ -1,5 +1,6 @@
+import { useSessionMutation } from "../useSessionMutation";
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, Plus, RotateCcw } from "lucide-react";
 import { errorMessage, formatBytes, formatDate } from "../api";
 import { operations } from "../operationsApi";
@@ -9,7 +10,7 @@ export function SaveTools({ stopped }: { stopped: boolean }) {
   const [dialog, setDialog] = useState<"create" | "archive" | null>(null);
   const [name, setName] = useState("");
   const client = useQueryClient();
-  const create = useMutation({
+  const create = useSessionMutation({
     mutationFn: operations.createSave,
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ["saves"] });
@@ -51,7 +52,10 @@ export function SaveTools({ stopped }: { stopped: boolean }) {
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              create.mutate(name.endsWith(".zip") ? name : `${name}.zip`);
+              const trimmed = name.trim();
+              create.mutate(
+                /\.zip$/iu.test(trimmed) ? trimmed : `${trimmed}.zip`,
+              );
             }}
           >
             <div className="modal-body">
@@ -118,7 +122,7 @@ function ArchivedSaves({
     queryKey: ["archived-saves"],
     queryFn: operations.archivedSaves,
   });
-  const restore = useMutation({
+  const restore = useSessionMutation({
     mutationFn: operations.restoreSave,
     onSuccess: async () => {
       await Promise.all([
@@ -195,7 +199,7 @@ export function ArchiveSaveButton({
 }) {
   const [open, setOpen] = useState(false);
   const client = useQueryClient();
-  const mutation = useMutation({
+  const mutation = useSessionMutation({
     mutationFn: operations.archiveSave,
     onSuccess: async () => {
       await Promise.all([

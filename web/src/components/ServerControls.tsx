@@ -1,5 +1,6 @@
+import { useSessionMutation } from "../useSessionMutation";
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { LoaderCircle, Play, Square, OctagonX } from "lucide-react";
 import { useAccess } from "../authApi";
 import { operations } from "../operationsApi";
@@ -20,7 +21,7 @@ export default function ServerControls({ status }: { status: Status }) {
     enabled: selection.data?.load_latest === true,
   });
   const client = useQueryClient();
-  const mutation = useMutation({
+  const mutation = useSessionMutation({
     mutationFn: (
       action:
         { kind: "start"; save?: string } | { kind: "stop" } | { kind: "force" },
@@ -31,6 +32,7 @@ export default function ServerControls({ status }: { status: Status }) {
           ? operations.forceStop()
           : api.stop(),
     onSuccess: async (result) => {
+      await client.cancelQueries({ queryKey: ["status"] });
       client.setQueryData(["status"], result);
       setDialog(null);
       await client.invalidateQueries({ queryKey: ["telemetry"] });

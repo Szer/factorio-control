@@ -1,5 +1,6 @@
+import { useSessionMutation } from "../useSessionMutation";
 import { useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Box,
   Download,
@@ -16,7 +17,7 @@ import { ArchiveSaveButton, SaveTools } from "../components/SaveTools";
 import { EmptyState, Loading, Modal, Notice } from "../components/ui";
 
 export default function Saves({ status }: { status: Status }) {
-  const { canOperate } = useAccess();
+  const { canOperate, canAdmin } = useAccess();
   const [syncPlan, setSyncPlan] = useState<SaveSyncPlan | null>(null);
   const [operationId, setOperationId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -28,26 +29,28 @@ export default function Saves({ status }: { status: Status }) {
     queryKey: ["selection"],
     queryFn: api.selection,
   });
-  const promote = useMutation({
+  const promote = useSessionMutation({
     mutationFn: api.selectSave,
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      await client.cancelQueries({ queryKey: ["selection"] });
       client.setQueryData(["selection"], result);
     },
   });
-  const upload = useMutation({
+  const upload = useSessionMutation({
     mutationFn: api.upload,
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ["saves"] });
     },
   });
-  const sync = useMutation({
+  const sync = useSessionMutation({
     mutationFn: api.syncSaveMods,
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      await client.cancelQueries({ queryKey: ["mods"] });
       client.setQueryData(["mods"], result);
       setSyncPlan(null);
     },
   });
-  const review = useMutation({
+  const review = useSessionMutation({
     mutationFn: api.saveModPlan,
     onSuccess: (result) => {
       setSyncPlan(result);
@@ -188,7 +191,10 @@ export default function Saves({ status }: { status: Status }) {
       )}
       {promote.isSuccess && (
         <Notice success>
-          {promote.data.save} will be used on the next start.
+          {promote.data.load_latest
+            ? "The latest save (including autosaves)"
+            : promote.data.save}{" "}
+          will be used on the next start.
         </Notice>
       )}
       {fileError && <Notice>{fileError}</Notice>}
@@ -245,15 +251,22 @@ export default function Saves({ status }: { status: Status }) {
                     </ul>
                   </details>
                 )}
-                <a
-                  className="text-button"
-                  href="#settings"
-                  onClick={() => {
-                    setSyncPlan(null);
-                  }}
-                >
-                  Open server settings
-                </a>
+                {canAdmin ? (
+                  <a
+                    className="text-button"
+                    href="#settings"
+                    onClick={() => {
+                      setSyncPlan(null);
+                    }}
+                  >
+                    Open server settings
+                  </a>
+                ) : (
+                  <p>
+                    Ask an administrator to configure the Factorio portal
+                    credentials.
+                  </p>
+                )}
               </Notice>
             )}
             {!stopped && <Notice>Stop the server before syncing mods.</Notice>}
@@ -391,9 +404,14 @@ export default function Saves({ status }: { status: Status }) {
           </div>
         </Modal>
       )}
+      {saves.isError && saves.data && (
+        <Notice>
+          {errorMessage(saves.error)} Showing the last loaded saves.
+        </Notice>
+      )}
       {saves.isPending ? (
         <Loading />
-      ) : saves.isError ? (
+      ) : !saves.data ? (
         <Notice>{errorMessage(saves.error)}</Notice>
       ) : saves.data.length === 0 ? (
         <section className="panel">
