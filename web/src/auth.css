@@ -1,0 +1,102 @@
+.auth-login {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.auth-login > .panel {
+  width: min(100%, 420px);
+}
+.auth-login h1 {
+  font-size: 26px;
+}
+.auth-form {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  max-width: 480px;
+}
+.auth-form h2,
+.auth-form h3,
+.auth-form p {
+  margin: 0;
+}
+.auth-form label {
+  display: grid;
+  gap: 6px;
+}
+.auth-form input,
+.auth-form select {
+  width: 100%;
+  min-width: 0;
+}
+.auth-form .button {
+  justify-self: start;
+}
+.auth-accounts {
+  padding: 20px;
+}
+.auth-accounts > p {
+  margin-top: 0;
+  max-width: 70ch;
+}
+.auth-create,
+.auth-account-edit {
+  padding: 20px 0 0;
+}
+.auth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.auth-delete {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.auth-delete label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.auth-delete input {
+  width: auto;
+}
+.auth-menu {
+  position: relative;
+}
+.auth-menu summary {
+  cursor: pointer;
+  list-style: none;
+}
+.auth-menu summary span {
+  margin-left: 6px;
+}
+.auth-menu-panel {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: 0;
+  z-index: 40;
+  width: min(360px, calc(100vw - 32px));
+  padding-bottom: 16px;
+  box-shadow: 0 6px 24px #0009;
+}
+.auth-menu-panel > .button,
+.auth-menu-panel > p {
+  margin: 0 20px;
+}
+.auth-password {
+  width: 100%;
+}
+@media (max-width: 600px) {
+  .auth-login {
+    padding: 16px;
+  }
+  .auth-accounts {
+    padding: 14px;
+  }
+  .auth-menu summary span {
+    display: none;
+  }
+}
