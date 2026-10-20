@@ -31,6 +31,7 @@ use utoipa::ToSchema;
 const MAX_ARCHIVE: usize = 64 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 256 * 1024 * 1024;
 const MAX_MODS: usize = 500;
+static UPDATE_CHECKS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct InstalledMod {
@@ -69,6 +70,11 @@ pub struct ModUpdates {
     pub installed_version: String,
     #[schema(required = true)]
     pub latest_version: Option<String>,
+    #[schema(required = true)]
+    pub latest_released_at: Option<String>,
+    pub factorio_min_version: String,
+    pub compatible: bool,
+    pub update_available: bool,
     pub authenticated: bool,
     pub factorio_version: String,
     #[schema(required = true)]
@@ -958,6 +964,8 @@ pub async fn upload_settings(
 #[derive(Clone, Deserialize)]
 struct Release {
     version: String,
+    #[serde(default)]
+    released_at: Option<String>,
     download_url: String,
     sha1: String,
     info_json: ReleaseInfo,
@@ -965,6 +973,8 @@ struct Release {
 #[derive(Clone, Deserialize)]
 struct ReleaseInfo {
     factorio_version: String,
+    #[serde(default)]
+    dependencies: Vec<String>,
 }
 #[derive(Deserialize)]
 struct PortalMod {
@@ -1015,11 +1025,18 @@ async fn response_bytes(mut response: reqwest::Response, limit: usize) -> Result
     Ok(bytes)
 }
 async fn releases(client: &reqwest::Client, name: &str) -> Result<Vec<Release>> {
+    portal_releases(client, name, false).await
+}
+async fn full_releases(client: &reqwest::Client, name: &str) -> Result<Vec<Release>> {
+    portal_releases(client, name, true).await
+}
+async fn portal_releases(client: &reqwest::Client, name: &str, full: bool) -> Result<Vec<Release>> {
     if !valid_name(name) {
         return Err(Error::bad("Invalid mod name"));
     }
+    let suffix = if full { "/full" } else { "" };
     let response = client
-        .get(format!("https://mods.factorio.com/api/mods/{name}"))
+        .get(format!("https://mods.factorio.com/api/mods/{name}{suffix}"))
         .send()
         .await
         .map_err(|_| Error {
@@ -1034,19 +1051,129 @@ async fn releases(client: &reqwest::Client, name: &str) -> Result<Vec<Release>> 
     }
     Ok(document.releases)
 }
-fn newest<'a>(
-    releases: &'a [Release],
-    installed: &InstalledMod,
-    engine: &str,
-) -> Option<&'a Release> {
-    let installed_version = version(&installed.version).ok()?;
+fn base_constraints(dependencies: &[String]) -> Result<Vec<(&str, [u32; 3])>> {
+    let mut constraints = Vec::new();
+    for dependency in dependencies {
+        let mut text = dependency.trim();
+        let incompatible = text.starts_with('!');
+        if let Some(rest) = text.strip_prefix("(?)") {
+            text = rest.trim();
+        } else if text.starts_with(['?', '!', '~', '+']) {
+            text = text
+                .get(1..)
+                .ok_or_else(|| Error::bad("Invalid dependency"))?
+                .trim();
+        }
+        let (name, comparison) = match text.find(['<', '>', '=']) {
+            Some(index) => (
+                text.get(..index)
+                    .ok_or_else(|| Error::bad("Invalid dependency"))?
+                    .trim(),
+                text.get(index..)
+                    .ok_or_else(|| Error::bad("Invalid dependency"))?
+                    .trim(),
+            ),
+            None => (text, ""),
+        };
+        if name != "base" {
+            continue;
+        }
+        if incompatible {
+            return Err(Error::bad("Mod conflicts with Factorio base"));
+        }
+        if comparison.is_empty() {
+            continue;
+        }
+        let length = if comparison.starts_with("<=") || comparison.starts_with(">=") {
+            2
+        } else {
+            1
+        };
+        let operator = comparison
+            .get(..length)
+            .ok_or_else(|| Error::bad("Invalid dependency comparison"))?;
+        if !matches!(operator, "=" | ">=" | ">" | "<=" | "<") {
+            return Err(Error::bad("Invalid dependency comparison"));
+        }
+        let required = comparison
+            .get(length..)
+            .ok_or_else(|| Error::bad("Invalid dependency version"))?
+            .trim();
+        constraints.push((operator, dependency_version(required)?));
+    }
+    Ok(constraints)
+}
+fn engine_compatible(factorio_version: &str, dependencies: &[String], engine: &str) -> bool {
+    let (Ok(actual), Ok(constraints)) = (version(engine), base_constraints(dependencies)) else {
+        return false;
+    };
+    family(factorio_version) == family(engine)
+        && constraints
+            .iter()
+            .all(|(operator, required)| match *operator {
+                "=" => actual == *required,
+                ">=" => actual >= *required,
+                ">" => actual > *required,
+                "<=" => actual <= *required,
+                "<" => actual < *required,
+                _ => false,
+            })
+}
+fn minimum_engine(factorio_version: &str, dependencies: &[String]) -> Result<String> {
+    let mut minimum = dependency_version(factorio_version)?;
+    let mut strict = false;
+    for (operator, required) in base_constraints(dependencies)? {
+        if matches!(operator, "=" | ">=" | ">")
+            && (required > minimum || required == minimum && operator == ">")
+        {
+            minimum = required;
+            strict = operator == ">";
+        }
+    }
+    let [major, minor, patch] = minimum;
+    Ok(format!(
+        "{}{major}.{minor}.{patch}",
+        if strict { "> " } else { "" }
+    ))
+}
+fn newest<'a>(releases: &'a [Release], engine: &str) -> Option<&'a Release> {
     releases
         .iter()
         .filter(|item| {
-            family(&item.info_json.factorio_version) == family(engine)
-                && version(&item.version).is_ok_and(|v| v > installed_version)
+            engine_compatible(
+                &item.info_json.factorio_version,
+                &item.info_json.dependencies,
+                engine,
+            ) && version(&item.version).is_ok()
         })
         .max_by_key(|item| version(&item.version).ok())
+}
+fn update_summary(
+    installed: &InstalledMod,
+    releases: &[Release],
+    engine: &str,
+    authenticated: bool,
+) -> Result<ModUpdates> {
+    let latest = newest(releases, engine);
+    let installed_version = version(&installed.version)?;
+    Ok(ModUpdates {
+        name: installed.name.clone(),
+        installed_version: installed.version.clone(),
+        latest_version: latest.map(|release| release.version.clone()),
+        latest_released_at: latest.and_then(|release| release.released_at.clone()),
+        factorio_min_version: minimum_engine(&installed.factorio_version, &installed.dependencies)?,
+        compatible: engine_compatible(&installed.factorio_version, &installed.dependencies, engine),
+        update_available: latest.is_some_and(|release| {
+            version(&release.version).is_ok_and(|candidate| candidate > installed_version)
+        }),
+        authenticated,
+        factorio_version: engine.to_owned(),
+        message: if authenticated {
+            None
+        } else {
+            Some("Set Factorio username and token in server settings or FACTORIO_USERNAME/FACTORIO_TOKEN to download updates. ZIP upload works without portal credentials.".into())
+        },
+    })
 }
 #[utoipa::path(get, path="/api/mods/{name}/updates", params(("name"=String, Path)), responses((status=200, body=ModUpdates), (status=400, body=ApiError), (status=409, body=ApiError), (status=502, body=ApiError)))]
 pub async fn get_updates(
@@ -1064,20 +1191,17 @@ pub async fn get_updates(
         let engine = known_engine(&inner)?.to_owned();
         (installed, engine, document.portal_authenticated)
     };
-    let releases = releases(&client()?, &name).await?;
-    let latest = newest(&releases, &installed, &engine).map(|release| release.version.clone());
-    Ok(Json(ModUpdates {
-        name,
-        installed_version: installed.version,
-        latest_version: latest,
+    let _permit = UPDATE_CHECKS
+        .acquire()
+        .await
+        .map_err(|_| Error::bad("Mod update checks are unavailable"))?;
+    let releases = full_releases(&client()?, &name).await?;
+    Ok(Json(update_summary(
+        &installed,
+        &releases,
+        &engine,
         authenticated,
-        factorio_version: engine,
-        message: if authenticated {
-            None
-        } else {
-            Some("Set Factorio username and token in server settings or FACTORIO_USERNAME/FACTORIO_TOKEN to download updates. ZIP upload works without portal credentials.".into())
-        },
-    }))
+    )?))
 }
 #[utoipa::path(post, path="/api/mods/{name}/update", params(("name"=String, Path)), request_body=ModUpdateRequest, responses((status=200, body=ModsDocument), (status=400, body=ApiError), (status=409, body=ApiError), (status=502, body=ApiError)))]
 pub async fn update_mod(
@@ -1100,9 +1224,13 @@ pub async fn update_mod(
         (installed, engine, username, token)
     };
     let client = client()?;
-    let releases = releases(&client, &name).await?;
-    let release = newest(&releases, &installed, &engine)
-        .filter(|release| release.version == input.version)
+    let releases = full_releases(&client, &name).await?;
+    let installed_version = version(&installed.version)?;
+    let release = newest(&releases, &engine)
+        .filter(|release| {
+            release.version == input.version
+                && version(&release.version).is_ok_and(|candidate| candidate > installed_version)
+        })
         .ok_or_else(|| {
             Error::conflict(
                 "Requested update is no longer the latest compatible release. Check updates again",
@@ -1144,4 +1272,142 @@ pub async fn update_mod(
         &bytes,
         Some(known_engine(&inner)?),
     )?))
+}
+
+#[cfg(test)]
+mod release_summary_tests {
+    use super::*;
+
+    fn installed(version: &str, family: &str, dependencies: &[&str]) -> InstalledMod {
+        InstalledMod {
+            name: "fixture".into(),
+            version: version.into(),
+            title: "Fixture".into(),
+            author: String::new(),
+            description: String::new(),
+            factorio_version: family.into(),
+            dependencies: dependencies.iter().map(|value| (*value).into()).collect(),
+            enabled: true,
+            file_name: "fixture.zip".into(),
+            size_bytes: 0,
+        }
+    }
+    fn release(version: &str, family: &str, dependencies: &[&str]) -> Release {
+        Release {
+            version: version.into(),
+            released_at: Some("2026-10-01T12:00:00Z".into()),
+            download_url: "/download/fixture".into(),
+            sha1: String::new(),
+            info_json: ReleaseInfo {
+                factorio_version: family.into(),
+                dependencies: dependencies.iter().map(|value| (*value).into()).collect(),
+            },
+        }
+    }
+    #[test]
+    fn current_release_keeps_latest_version_and_date() -> Result<()> {
+        let summary = update_summary(
+            &installed("1.4.1", "2.1", &["base >= 2.1.10"]),
+            &[release("1.4.1", "2.1", &["base >= 2.1.10"])],
+            "2.1.23",
+            true,
+        )?;
+        assert_eq!(summary.latest_version.as_deref(), Some("1.4.1"));
+        assert_eq!(
+            summary.latest_released_at.as_deref(),
+            Some("2026-10-01T12:00:00Z")
+        );
+        assert_eq!(summary.factorio_min_version, "2.1.10");
+        assert!(summary.compatible);
+        assert!(!summary.update_available);
+        Ok(())
+    }
+    #[test]
+    fn updates_ignore_future_families_and_patch_requirements() -> Result<()> {
+        let releases = [
+            release("4.0.0", "2.2", &[]),
+            release("3.0.0", "2.1", &["base >= 2.1.24"]),
+            release("2.0.0", "2.1", &["base >= 2.1.23"]),
+            release("1.0.0", "2.1", &[]),
+        ];
+        let summary = update_summary(&installed("1.0.0", "2.1", &[]), &releases, "2.1.23", true)?;
+        assert_eq!(summary.latest_version.as_deref(), Some("2.0.0"));
+        assert!(summary.update_available);
+        Ok(())
+    }
+    #[test]
+    fn mod_version_does_not_determine_game_compatibility() -> Result<()> {
+        let summary = update_summary(
+            &installed("99.99.99", "2.0", &["base >= 2.0"]),
+            &[release("9.0.0", "2.1", &[])],
+            "2.1.23",
+            false,
+        )?;
+        assert!(!summary.compatible);
+        assert!(!summary.update_available);
+        assert_eq!(summary.latest_version.as_deref(), Some("9.0.0"));
+        assert_eq!(summary.factorio_min_version, "2.0.0");
+        Ok(())
+    }
+    #[test]
+    fn unsupported_installed_patch_is_distinct_from_available_upgrade() -> Result<()> {
+        let summary = update_summary(
+            &installed("1.0.0", "2.1", &["base > 2.1.23"]),
+            &[release("1.1.0", "2.1", &["base < 2.1.23"])],
+            "2.1.23",
+            true,
+        )?;
+        assert!(!summary.compatible);
+        assert_eq!(summary.factorio_min_version, "> 2.1.23");
+        assert!(summary.latest_version.is_none());
+        assert!(summary.latest_released_at.is_none());
+        assert!(!summary.update_available);
+        Ok(())
+    }
+    #[test]
+    fn minimum_respects_family_baseline_and_strongest_lower_bound() -> Result<()> {
+        assert_eq!(minimum_engine("2.1", &["base > 2.0.99".into()])?, "2.1.0");
+        assert_eq!(
+            minimum_engine(
+                "2.1",
+                &[
+                    "base >= 2.1.20".into(),
+                    "base > 2.1.20".into(),
+                    "base >= 2.1.20".into()
+                ]
+            )?,
+            "> 2.1.20"
+        );
+        assert!(engine_compatible("2.1", &["base>2.1.20".into()], "2.1.21"));
+        assert!(!engine_compatible("2.1", &["base=2.1.20".into()], "2.1.21"));
+        Ok(())
+    }
+    #[test]
+    fn missing_release_date_and_short_endpoint_dependencies_remain_optional()
+    -> std::result::Result<(), serde_json::Error> {
+        let release: Release = serde_json::from_value(
+            serde_json::json!({ "version":"1.0.0", "download_url":"/download/fixture", "sha1":"fixture", "info_json":{"factorio_version":"2.1"} }),
+        )?;
+        assert!(release.released_at.is_none());
+        assert!(release.info_json.dependencies.is_empty());
+        assert!(newest(&[release], "2.1.23").is_some());
+        Ok(())
+    }
+    #[test]
+    fn malformed_base_constraints_fail_closed_and_optional_base_still_applies() {
+        for dependency in [
+            "base >= tomorrow",
+            "base == 2.1",
+            "! base",
+            "? base > 2.1.23",
+            "(?) base > 2.1.23",
+        ] {
+            assert!(!engine_compatible("2.1", &[dependency.into()], "2.1.23"));
+        }
+        assert!(engine_compatible(
+            "2.1",
+            &["some-unrelated-mod >= 999.0.0".into()],
+            "2.1.23"
+        ));
+    }
 }
