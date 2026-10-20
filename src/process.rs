@@ -1,0 +1,264 @@
+use crate::{App, Error, Result, log, models::*, now, storage};
+use std::{os::unix::process::ExitStatusExt, process::Stdio, time::Duration};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
+
+pub async fn start(app: &App, name: &str) -> Result<Status> {
+    let mut inner = app.inner.lock().await;
+    if inner.child.is_some() {
+        return Err(Error::conflict("The server is already active"));
+    }
+    let save = storage::save_path(&app.saves_path(), name)?;
+    if !save.is_file() {
+        return Err(Error::bad("The selected save does not exist"));
+    }
+    let binary = app
+        .binary
+        .as_ref()
+        .ok_or_else(|| Error::bad("Configure FC_FACTORIO_BIN before starting a server"))?;
+    let settings = storage::settings(&app.settings_path())?;
+    if settings.revision == "missing" {
+        storage::update_settings(&app.settings_path(), settings)?;
+    }
+    let admins = storage::admins(&app.admins_path())?;
+    if admins.revision == "missing" {
+        storage::update_admins(&app.admins_path(), admins)?;
+    }
+    // Factorio writes runtime files below the managed data directory.
+    let config = app.directory.join("config.ini");
+    storage::ensure_regular(&config)?;
+    if !config.exists() {
+        let data = app
+            .directory
+            .to_str()
+            .ok_or_else(|| Error::bad("Data directory must be UTF-8"))?;
+        if data.contains(['\r', '\n']) {
+            return Err(Error::bad("Data directory contains a newline"));
+        }
+        let contents =
+            format!("[path]\nread-data=__PATH__executable__/../../data\nwrite-data={data}\n");
+        storage::atomic_write(&config, contents.as_bytes(), false)?;
+    }
+    let mut command = Command::new(binary);
+    command
+        .current_dir(&app.directory)
+        .args(["--start-server"])
+        .arg(save)
+        .arg("--server-settings")
+        .arg(app.settings_path())
+        .arg("--server-adminlist")
+        .arg(app.admins_path())
+        .arg("--config")
+        .arg(config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            inner.status.state = ServerState::Failed;
+            inner.status.error = Some(format!("Unable to launch Factorio: {error}"));
+            log(
+                &mut inner,
+                LogLevel::Error,
+                format!("Unable to launch Factorio: {error}"),
+            );
+            return Err(error.into());
+        }
+    };
+    inner.generation = inner.generation.saturating_add(1);
+    let generation = inner.generation;
+    if let Some(stdout) = child.stdout.take() {
+        tokio::spawn(pump(app.clone(), stdout, LogLevel::Info, generation));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(pump(app.clone(), stderr, LogLevel::Warn, generation));
+    }
+    inner.child = Some(child);
+    inner.stopping_at = None;
+    inner.status.state = ServerState::Starting;
+    inner.status.active_save = Some(name.into());
+    inner.status.started_at = Some(now());
+    inner.status.error = None;
+    log(&mut inner, LogLevel::Info, format!("Starting {name}"));
+    Ok(inner.status.clone())
+}
+pub async fn stop(app: &App) -> Result<Status> {
+    let mut inner = app.inner.lock().await;
+    if inner.status.state == ServerState::Stopping {
+        return Ok(inner.status.clone());
+    }
+    let Some(child) = inner.child.as_mut() else {
+        return Err(Error::conflict("The server is not active"));
+    };
+    let pid = child
+        .id()
+        .ok_or_else(|| Error::conflict("The server has already exited"))?;
+    let pid = i32::try_from(pid).map_err(|_| Error::bad("Invalid server process identifier"))?;
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGINT,
+    )
+    .map_err(|error| Error::from(std::io::Error::from_raw_os_error(error as i32)))?;
+    inner.status.state = ServerState::Stopping;
+    inner.stopping_at = Some(std::time::Instant::now());
+    log(
+        &mut inner,
+        LogLevel::Info,
+        "Stopping server; waiting for Factorio to save and exit".into(),
+    );
+    Ok(inner.status.clone())
+}
+pub async fn monitor(app: App) {
+    let mut timer = tokio::time::interval(Duration::from_millis(200));
+    loop {
+        timer.tick().await;
+        poll(&app).await;
+    }
+}
+pub async fn poll(app: &App) {
+    let mut inner = app.inner.lock().await;
+    let timed_out = inner
+        .stopping_at
+        .is_some_and(|t| t.elapsed() > Duration::from_secs(120));
+    let Some(child) = inner.child.as_mut() else {
+        return;
+    };
+    if timed_out {
+        if let Err(error) = child.start_kill() {
+            log(
+                &mut inner,
+                LogLevel::Error,
+                format!("Unable to terminate server: {error}"),
+            );
+        } else {
+            log(
+                &mut inner,
+                LogLevel::Warn,
+                "Server did not stop within 120 seconds; terminated it".into(),
+            );
+        }
+        inner.stopping_at = None;
+        inner.status.error = Some("Server exceeded the graceful shutdown timeout".into());
+    }
+    let result = match inner.child.as_mut() {
+        Some(child) => child.try_wait(),
+        None => return,
+    };
+    match result {
+        Ok(Some(exit)) => {
+            let clean = exit.success()
+                || (inner.status.state == ServerState::Stopping
+                    && inner.status.error.is_none()
+                    && exit.signal() == Some(nix::libc::SIGINT));
+            inner.status.state = if clean {
+                ServerState::Stopped
+            } else {
+                ServerState::Failed
+            };
+            if !clean && inner.status.error.is_none() {
+                inner.status.error = Some(format!("Factorio exited with {exit}"));
+            }
+            inner.status.started_at = None;
+            inner.child = None;
+            inner.stopping_at = None;
+            log(
+                &mut inner,
+                if clean {
+                    LogLevel::Info
+                } else {
+                    LogLevel::Error
+                },
+                format!("Factorio exited with {exit}"),
+            );
+        }
+        Ok(None) => (),
+        Err(error) => {
+            log(
+                &mut inner,
+                LogLevel::Error,
+                format!("Unable to check server process: {error}"),
+            );
+        }
+    }
+}
+async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64) {
+    let message = String::from_utf8_lossy(bytes)
+        .trim_end_matches('\r')
+        .to_owned();
+    let mut inner = app.inner.lock().await;
+    if inner.generation == generation
+        && inner.status.state == ServerState::Starting
+        && (message.contains("Hosting game at IP ADDR:") || message.contains("to(InGame)"))
+    {
+        inner.status.state = ServerState::Running;
+    }
+    if inner.generation == generation
+        && let Some((_, rest)) = message.split_once("Factorio ")
+        && let Some(version) = rest.split_whitespace().next()
+        && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && version.contains('.')
+    {
+        inner.status.version = Some(version.into());
+    }
+    log(&mut inner, level, message);
+}
+async fn pump(app: App, mut reader: impl AsyncRead + Unpin, level: LogLevel, generation: u64) {
+    let mut chunk = [0_u8; 4096];
+    let mut line = Vec::new();
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => {
+                if !line.is_empty() {
+                    record(&app, level.clone(), &line, generation).await;
+                }
+                break;
+            }
+            Ok(size) => {
+                for byte in &chunk[..size] {
+                    if *byte == b'\n' {
+                        record(&app, level.clone(), &line, generation).await;
+                        line.clear();
+                    } else if line.len() < 16384 {
+                        line.push(*byte);
+                    }
+                }
+            }
+            Err(error) => {
+                let mut inner = app.inner.lock().await;
+                log(
+                    &mut inner,
+                    LogLevel::Error,
+                    format!("Unable to read Factorio output: {error}"),
+                );
+                break;
+            }
+        }
+    }
+}
+pub async fn shutdown(app: &App) {
+    let active = app.inner.lock().await.child.is_some();
+    if !active {
+        return;
+    }
+    if let Err(error) = stop(app).await {
+        eprintln!("Graceful shutdown request failed: {}", error.message);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(125);
+    while tokio::time::Instant::now() < deadline {
+        poll(app).await;
+        if app.inner.lock().await.child.is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut inner = app.inner.lock().await;
+    if let Some(mut child) = inner.child.take()
+        && let Err(error) = child.kill().await
+    {
+        eprintln!("Final server shutdown failed: {error}");
+    }
+}
