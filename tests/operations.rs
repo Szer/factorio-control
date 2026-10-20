@@ -391,3 +391,45 @@ async fn create_operation_gate_blocks_launch_without_blocking_status() -> TestRe
     assert!(app.save_operations.try_lock().is_ok());
     Ok(())
 }
+
+#[tokio::test]
+async fn interrupted_mod_transaction_blocks_launch_even_when_version_is_unknown() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let binary = dir.path().join("fake-factorio");
+    script(&binary, "touch launched; exit 0")?;
+    let app = App::new(dir.path().join("data"), Some(binary)).map_err(failure)?;
+    world(&app.saves_path().join("world.zip"))?;
+    fs::write(app.directory.join("mod-transaction.json"), b"{}")?;
+    let start = process::start(&app, "world.zip").await;
+    assert!(
+        matches!(start, Err(error) if error.status == StatusCode::CONFLICT && error.message.contains("interrupted"))
+    );
+    let create = process::create_save(&app, "new.zip").await;
+    assert!(matches!(create, Err(error) if error.status == StatusCode::CONFLICT));
+    assert!(!app.directory.join("launched").exists());
+    assert!(!app.saves_path().join("new.zip").exists());
+    Ok(())
+}
+
+#[test]
+fn runtime_paths_reads_only_path_keys_and_rejects_oversized_or_linked_config() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = dir.path().join("config.ini");
+    fs::write(&config, b"[path]\nread-data=/game/data\nwrite-data=/game/state\n[other]\nread-data=ignore\npassword=synthetic\n")?;
+    let paths = storage::runtime_paths(dir.path(), None).map_err(failure)?;
+    assert_eq!(paths.read_data, "/game/data");
+    assert_eq!(paths.write_data, "/game/state");
+    assert!(paths.game_binary.is_none());
+    assert!(!serde_json::to_string(&paths)?.contains("synthetic"));
+    fs::write(&config, vec![b'x'; 64 * 1024 + 1])?;
+    assert!(storage::runtime_paths(dir.path(), None).is_err());
+    fs::remove_file(&config)?;
+    symlink("untrusted.ini", &config)?;
+    assert!(storage::runtime_paths(dir.path(), None).is_err());
+    assert!(!factorio_control::auth::permits(
+        factorio_control::auth::Role::Viewer,
+        &axum::http::Method::GET,
+        "/api/runtime-paths"
+    ));
+    Ok(())
+}

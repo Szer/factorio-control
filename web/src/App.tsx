@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Box,
   ChevronRight,
@@ -11,6 +11,8 @@ import {
   Package,
   X,
 } from "lucide-react";
+import { AuthGate, SessionMenu } from "./components/Auth";
+import { useAccess } from "./authApi";
 import { api, errorMessage } from "./api";
 import { Loading, Notice, StatusBadge } from "./components/ui";
 import Overview from "./pages/Overview";
@@ -30,16 +32,51 @@ const navigation = [
 ] satisfies { id: Page; label: string; icon: typeof Factory }[];
 
 export default function App() {
-  const [page, setPage] = useState(readPage);
+  return (
+    <AuthGate>
+      <AppContent />
+    </AuthGate>
+  );
+}
+function AppContent() {
+  const { canAdmin } = useAccess();
+  const [requestedPage, setPage] = useState(readPage);
+  const page =
+    requestedPage === "settings" && !canAdmin ? "overview" : requestedPage;
   const [menuOpen, setMenuOpen] = useState(false);
-  const manager = useQuery({ queryKey: ["manager"], queryFn: api.manager });
+  const manager = useQuery({
+    queryKey: ["manager"],
+    queryFn: api.manager,
+    enabled: canAdmin,
+  });
   const interval = (manager.data?.settings.poll_interval_seconds ?? 2) * 1000;
   const status = useQuery({
     queryKey: ["status"],
     queryFn: api.status,
     refetchInterval: interval,
   });
-  const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
+  const client = useQueryClient();
+  const previousState = useRef(status.data?.state);
+  useEffect(() => {
+    const state = status.data?.state;
+    if (
+      previousState.current &&
+      state !== previousState.current &&
+      (state === "stopped" || state === "failed")
+    ) {
+      Promise.all(
+        ["mods", "mod-settings", "saves", "selection"].map((key) =>
+          client.invalidateQueries({ queryKey: [key] }),
+        ),
+      ).catch(() => undefined);
+    }
+    previousState.current = state;
+  }, [status.data?.state, client]);
+  const settings = useQuery({
+    queryKey: ["settings"],
+    queryFn: api.settings,
+    enabled: canAdmin,
+  });
   useEffect(() => {
     const change = () => {
       setPage(readPage());
@@ -76,17 +113,19 @@ export default function App() {
           </div>
         </div>
         <nav aria-label="Main navigation">
-          {navigation.map(({ id, label, icon: Icon }) => (
-            <a
-              key={id}
-              href={`#${id}`}
-              className={page === id ? "nav-item active" : "nav-item"}
-              aria-current={page === id ? "page" : undefined}
-            >
-              <Icon size={18} strokeWidth={1.7} />
-              {label}
-            </a>
-          ))}
+          {navigation
+            .filter((item) => canAdmin || item.id !== "settings")
+            .map(({ id, label, icon: Icon }) => (
+              <a
+                key={id}
+                href={`#${id}`}
+                className={page === id ? "nav-item active" : "nav-item"}
+                aria-current={page === id ? "page" : undefined}
+              >
+                <Icon size={18} strokeWidth={1.7} />
+                {label}
+              </a>
+            ))}
         </nav>
       </aside>
       {menuOpen && (
@@ -116,6 +155,7 @@ export default function App() {
             <ChevronRight size={13} />
             <strong>{title}</strong>
           </div>
+          <SessionMenu />
         </header>
         <main id="main-content">
           {status.data === undefined ? (
@@ -159,13 +199,23 @@ export default function App() {
                 <Overview status={status.data} interval={interval} />
               )}
               {page === "saves" && <Saves status={status.data} />}
-              <div hidden={page !== "settings"}>
-                <SettingsPage />
-              </div>
+              {canAdmin && (
+                <div hidden={page !== "settings"}>
+                  <SettingsPage />
+                </div>
+              )}
               <div hidden={page !== "mods"}>
                 <Mods status={status.data} active={page === "mods"} />
               </div>
-              {page === "console" && <Console interval={interval} />}
+              {page === "console" && (
+                <Console
+                  interval={interval}
+                  running={
+                    status.data.state === "running" ||
+                    status.data.state === "paused"
+                  }
+                />
+              )}
             </>
           )}
         </main>

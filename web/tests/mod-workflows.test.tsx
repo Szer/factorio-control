@@ -198,3 +198,43 @@ it("disables mutations while running and leaves exports available", async () => 
       .getAttribute("href"),
   ).toBe("/api/mods/export");
 });
+
+it("reloads a conflicted mod revision without silently retrying the mutation", async () => {
+  vi.spyOn(modWorkflowApi, "packs").mockResolvedValue([]);
+  const snapshot = vi
+    .spyOn(modWorkflowApi, "createPack")
+    .mockRejectedValue(new ApiError("Mods changed. Reload before saving", 409));
+  mount();
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Manage mods" }));
+  await user.click(screen.getByRole("button", { name: "Mod packs" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Pack name" }),
+    "fixture-pack",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Snapshot current mods" }),
+  );
+  await screen.findByText("Mods changed. Reload before saving");
+  vi.mocked(api.mods).mockResolvedValue({
+    ...document,
+    revision: "mods-after-game",
+  });
+  await user.click(screen.getByRole("button", { name: "Reload mod list" }));
+  await waitFor(() => {
+    expect(
+      screen.queryByRole("button", { name: "Reload mod list" }),
+    ).toBeNull();
+  });
+  expect(snapshot).toHaveBeenCalledOnce();
+  snapshot.mockResolvedValue([]);
+  await user.click(
+    screen.getByRole("button", { name: "Snapshot current mods" }),
+  );
+  await waitFor(() => {
+    expect(snapshot).toHaveBeenLastCalledWith(
+      "mods-after-game",
+      "fixture-pack",
+    );
+  });
+});

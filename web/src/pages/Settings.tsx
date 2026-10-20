@@ -1,3 +1,4 @@
+import { operations } from "../operationsApi";
 import { useEffect, useState } from "react";
 import type { SyntheticEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -10,6 +11,7 @@ import {
 } from "../api";
 import type { Settings, RawSettingsDocument, ManagerDocument } from "../api";
 import { Loading, Notice } from "../components/ui";
+import { AccountPanel } from "../components/Auth";
 import Administrators from "../components/Administrators";
 import { EditorMode, JsonEditor } from "../components/JsonEditor";
 import { useUnsavedChanges } from "../useUnsavedChanges";
@@ -647,6 +649,34 @@ function ManagerForm({ initial }: { initial: ManagerDocument }) {
               />
               <small>History is kept in memory while the manager runs.</small>
             </label>
+            <label className="field compact-field">
+              Game bind address
+              <input
+                required
+                value={draft.game_bind_address}
+                disabled={busy}
+                onChange={(event) => {
+                  setDraft({ ...draft, game_bind_address: event.target.value });
+                  save.reset();
+                }}
+              />
+              <small>Applied on the next server start.</small>
+            </label>
+            <label className="field compact-field">
+              Game UDP port
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                required
+                value={Number.isNaN(draft.game_port) ? "" : draft.game_port}
+                disabled={busy}
+                onChange={(event) => {
+                  setDraft({ ...draft, game_port: event.target.valueAsNumber });
+                  save.reset();
+                }}
+              />
+            </label>
             <label className="toggle-row">
               <span>
                 <strong>Enable scripting telemetry</strong>
@@ -712,6 +742,45 @@ function ManagerForm({ initial }: { initial: ManagerDocument }) {
     </form>
   );
 }
+function RuntimePathsDetails() {
+  const [open, setOpen] = useState(false);
+  const paths = useQuery({
+    queryKey: ["runtime-paths"],
+    queryFn: operations.runtimePaths,
+    enabled: open,
+  });
+  return (
+    <details
+      className="runtime-paths"
+      onToggle={(event) => {
+        setOpen(event.currentTarget.open);
+      }}
+    >
+      <summary>Runtime paths</summary>
+      {open &&
+        (paths.isPending ? (
+          <Loading />
+        ) : paths.isError ? (
+          <Notice>{errorMessage(paths.error)}</Notice>
+        ) : (
+          <dl>
+            {[
+              ["Manager data", paths.data.manager_data],
+              ["Game executable", paths.data.game_binary ?? "Not configured"],
+              ["Game configuration", paths.data.config_file],
+              ["Read data", paths.data.read_data],
+              ["Write data", paths.data.write_data],
+            ].map(([label, value]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{value}</dd>
+              </div>
+            ))}
+          </dl>
+        ))}
+    </details>
+  );
+}
 function ManagerSettings() {
   const query = useQuery({ queryKey: ["manager"], queryFn: api.manager });
   if (query.data === undefined)
@@ -726,11 +795,14 @@ function ManagerSettings() {
         <Notice>{errorMessage(query.error)} Your draft is kept below.</Notice>
       )}
       <ManagerForm initial={query.data} />
+      <RuntimePathsDetails />
     </>
   );
 }
 export default function SettingsPage() {
-  const [tab, setTab] = useState<"server" | "manager" | "admins">("server");
+  const [tab, setTab] = useState<"server" | "manager" | "admins" | "accounts">(
+    "server",
+  );
   useEffect(() => {
     const show = () => {
       setTab("manager");
@@ -748,6 +820,7 @@ export default function SettingsPage() {
             ["server", "Server settings"],
             ["admins", "Administrators"],
             ["manager", "Manager settings"],
+            ["accounts", "Panel accounts"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -770,6 +843,9 @@ export default function SettingsPage() {
       </div>
       <div hidden={tab !== "manager"}>
         <ManagerSettings />
+      </div>
+      <div hidden={tab !== "accounts"}>
+        <AccountPanel />
       </div>
     </>
   );

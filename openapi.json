@@ -83,6 +83,192 @@
         }
       }
     },
+    "/api/auth/accounts": {
+      "get": {
+        "tags": [],
+        "operationId": "accounts",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountsDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/accounts/create": {
+      "post": {
+        "tags": [],
+        "operationId": "create_account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAccount"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountsDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/accounts/delete": {
+      "post": {
+        "tags": [],
+        "operationId": "delete_account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteAccount"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountsDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/accounts/update": {
+      "post": {
+        "tags": [],
+        "operationId": "update_account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAccount"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountsDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [],
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          },
+          "429": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [],
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/auth/password": {
+      "post": {
+        "tags": [],
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/auth/status": {
+      "get": {
+        "tags": [],
+        "operationId": "auth_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/logs": {
       "get": {
         "tags": [],
@@ -97,6 +283,34 @@
                   "items": {
                     "$ref": "#/components/schemas/LogEntry"
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/logs/file": {
+      "get": {
+        "tags": [],
+        "operationId": "game_log",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameLogDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -201,6 +415,393 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/bulk/apply": {
+      "post": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "bulk_apply",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkPlan"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/bulk/preview": {
+      "post": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "bulk_preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkPlan"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/export": {
+      "get": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "export_all",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/zip": {}
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/list": {
+      "get": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "export_list",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListDocument"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "import_list",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListDocument"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/operation": {
+      "get": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "operation_progress",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ModOperationProgress"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/packs": {
+      "get": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "packs",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PackSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "create_pack",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PackSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/packs/{name}": {
+      "delete": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "delete_pack",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pack_revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PackSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/packs/{name}/restore": {
+      "post": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "restore_pack",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestorePackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/portal/install": {
+      "post": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "install_portal",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortalInstallRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/portal/search": {
+      "get": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PortalSearchEntry"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/portal/{name}/releases": {
+      "get": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "portal_versions",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortalReleases"
                 }
               }
             }
@@ -423,6 +1024,44 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mods/{name}": {
+      "delete": {
+        "tags": [
+          "crate::mods::workflows"
+        ],
+        "operationId": "remove_mod",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModsDocument"
                 }
               }
             }
@@ -656,6 +1295,34 @@
         }
       }
     },
+    "/api/runtime-paths": {
+      "get": {
+        "tags": [],
+        "operationId": "runtime_paths",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimePaths"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/saves": {
       "get": {
         "tags": [],
@@ -675,6 +1342,143 @@
             }
           },
           "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saves/archived": {
+      "get": {
+        "tags": [],
+        "operationId": "archived_saves",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ArchivedSave"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saves/archived/{id}/restore": {
+      "post": {
+        "tags": [],
+        "operationId": "restore_save",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveRevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Save"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saves/create": {
+      "post": {
+        "tags": [],
+        "operationId": "create_save",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSaveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Save"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
             "description": "",
             "content": {
               "application/json": {
@@ -871,6 +1675,64 @@
         }
       }
     },
+    "/api/saves/{name}/archive": {
+      "post": {
+        "tags": [],
+        "operationId": "archive_save",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveRevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchivedSave"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/saves/{name}/mods": {
       "get": {
         "tags": [
@@ -999,6 +1861,102 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ModsDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/server/command": {
+      "post": {
+        "tags": [],
+        "operationId": "command",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsoleCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/server/force-stop": {
+      "post": {
+        "tags": [],
+        "operationId": "force_stop",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForceStopRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
                 }
               }
             }
@@ -1299,6 +2257,39 @@
   },
   "components": {
     "schemas": {
+      "Account": {
+        "type": "object",
+        "required": [
+          "username",
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "AccountsDocument": {
+        "type": "object",
+        "required": [
+          "revision",
+          "accounts"
+        ],
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Account"
+            }
+          },
+          "revision": {
+            "type": "string"
+          }
+        }
+      },
       "Activity": {
         "type": "object",
         "required": [
@@ -1376,11 +2367,188 @@
           }
         }
       },
+      "ArchivedSave": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "size_bytes",
+          "modified_at",
+          "revision"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "modified_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "BulkChange": {
+        "type": "object",
+        "required": [
+          "name",
+          "current_version",
+          "version"
+        ],
+        "properties": {
+          "current_version": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BulkPlan": {
+        "type": "object",
+        "required": [
+          "revision",
+          "changes"
+        ],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkChange"
+            }
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "CommandPermission": {
         "type": "string",
         "enum": [
           "admins-only"
         ]
+      },
+      "CommandResponse": {
+        "type": "object",
+        "required": [
+          "accepted"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ConsoleCommandRequest": {
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "acknowledge_scripting": {
+            "type": "boolean"
+          },
+          "command": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateAccount": {
+        "type": "object",
+        "required": [
+          "revision",
+          "username",
+          "password",
+          "role"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateSaveRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteAccount": {
+        "type": "object",
+        "required": [
+          "revision",
+          "username"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "ForceStopRequest": {
+        "type": "object",
+        "required": [
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GameLogDocument": {
+        "type": "object",
+        "required": [
+          "name",
+          "content",
+          "truncated"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
       },
       "InstalledMod": {
         "type": "object",
@@ -1434,6 +2602,47 @@
           }
         }
       },
+      "ListDocument": {
+        "type": "object",
+        "required": [
+          "revision",
+          "mods"
+        ],
+        "properties": {
+          "mods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListEntry"
+            }
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ListEntry": {
+        "type": "object",
+        "required": [
+          "name",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "LogEntry": {
         "type": "object",
         "required": [
@@ -1469,6 +2678,21 @@
           "error"
         ]
       },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
       "ManagerSettings": {
         "type": "object",
         "required": [
@@ -1479,6 +2703,14 @@
         "properties": {
           "enable_script_telemetry": {
             "type": "boolean"
+          },
+          "game_bind_address": {
+            "type": "string"
+          },
+          "game_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           },
           "poll_interval_seconds": {
             "type": "integer",
@@ -1526,6 +2758,37 @@
           }
         },
         "additionalProperties": false
+      },
+      "ModOperationProgress": {
+        "type": "object",
+        "required": [
+          "active",
+          "stage",
+          "completed",
+          "total"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "completed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "current": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
       },
       "ModSetting": {
         "type": "object",
@@ -1743,6 +3006,131 @@
           }
         }
       },
+      "PackRequest": {
+        "type": "object",
+        "required": [
+          "revision",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PackSummary": {
+        "type": "object",
+        "required": [
+          "revision",
+          "name",
+          "mods"
+        ],
+        "properties": {
+          "mods": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        }
+      },
+      "PasswordChange": {
+        "type": "object",
+        "required": [
+          "current_password",
+          "password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "PortalInstallRequest": {
+        "type": "object",
+        "required": [
+          "revision",
+          "name",
+          "version"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PortalRelease": {
+        "type": "object",
+        "required": [
+          "version",
+          "factorio_version"
+        ],
+        "properties": {
+          "factorio_version": {
+            "type": "string"
+          },
+          "released_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "PortalReleases": {
+        "type": "object",
+        "required": [
+          "name",
+          "releases"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "releases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortalRelease"
+            }
+          }
+        }
+      },
+      "PortalSearchEntry": {
+        "type": "object",
+        "required": [
+          "name",
+          "title"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
       "RawSettingsDocument": {
         "type": "object",
         "required": [
@@ -1789,6 +3177,72 @@
           }
         }
       },
+      "RestorePackRequest": {
+        "type": "object",
+        "required": [
+          "revision",
+          "pack_revision"
+        ],
+        "properties": {
+          "pack_revision": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RevisionRequest": {
+        "type": "object",
+        "required": [
+          "revision"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "admin",
+          "operator",
+          "viewer"
+        ]
+      },
+      "RuntimePaths": {
+        "type": "object",
+        "required": [
+          "manager_data",
+          "game_binary",
+          "config_file",
+          "read_data",
+          "write_data"
+        ],
+        "properties": {
+          "config_file": {
+            "type": "string"
+          },
+          "game_binary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "manager_data": {
+            "type": "string"
+          },
+          "read_data": {
+            "type": "string"
+          },
+          "write_data": {
+            "type": "string"
+          }
+        }
+      },
       "SampleState": {
         "type": "string",
         "enum": [
@@ -1803,7 +3257,8 @@
         "required": [
           "name",
           "size_bytes",
-          "modified_at"
+          "modified_at",
+          "revision"
         ],
         "properties": {
           "modified_at": {
@@ -1814,12 +3269,27 @@
           "name": {
             "type": "string"
           },
+          "revision": {
+            "type": "string"
+          },
           "size_bytes": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
           }
         }
+      },
+      "SaveRevisionRequest": {
+        "type": "object",
+        "required": [
+          "revision"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "SaveSelectionDocument": {
         "type": "object",
@@ -1828,6 +3298,9 @@
           "save"
         ],
         "properties": {
+          "load_latest": {
+            "type": "boolean"
+          },
           "revision": {
             "type": "string"
           },
@@ -2004,6 +3477,35 @@
           "failed"
         ]
       },
+      "SessionStatus": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "user": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Account"
+              }
+            ]
+          }
+        }
+      },
       "SettingsDocument": {
         "type": "object",
         "required": [
@@ -2103,12 +3605,12 @@
       },
       "StartRequest": {
         "type": "object",
-        "required": [
-          "save"
-        ],
         "properties": {
           "save": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
@@ -2307,6 +3809,31 @@
           }
         },
         "additionalProperties": false
+      },
+      "UpdateAccount": {
+        "type": "object",
+        "required": [
+          "revision",
+          "username",
+          "role"
+        ],
+        "properties": {
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
       },
       "UpsPoint": {
         "type": "object",

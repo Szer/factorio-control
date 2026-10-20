@@ -1,3 +1,4 @@
+import { authExpired } from "./authApi";
 import { z } from "zod";
 import { ApiError, modsSchema } from "./api";
 
@@ -47,6 +48,7 @@ async function request<T>(
   });
   const value: unknown = await response.json().catch(() => null);
   if (!response.ok) {
+    if (response.status === 401) authExpired();
     const error = z.object({ message: z.string() }).safeParse(value);
     throw new ApiError(
       error.success

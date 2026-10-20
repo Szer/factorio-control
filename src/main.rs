@@ -3,28 +3,47 @@
 use factorio_control::{
     App,
     api::{self, Api},
-    process,
+    auth, process,
 };
-use std::{net::SocketAddr, path::PathBuf};
+use std::{io::Read, net::SocketAddr, path::PathBuf};
 use utoipa::OpenApi;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|arg| arg == "--openapi") {
-        println!("{}", Api::openapi().to_pretty_json()?);
+        let mut document = Api::openapi();
+        document.merge(auth::Api::openapi());
+        println!("{}", document.to_pretty_json()?);
         return Ok(());
     }
     let bind: SocketAddr = std::env::var("FC_BIND")
         .unwrap_or_else(|_| "127.0.0.1:9400".into())
         .parse()?;
-    if !bind.ip().is_loopback() {
-        return Err(
-            "FC_BIND must use a loopback address; authentication is not implemented".into(),
-        );
-    }
     let directory = PathBuf::from(std::env::var("FC_DATA_DIR").unwrap_or_else(|_| "./data".into()));
     let binary = std::env::var_os("FC_FACTORIO_BIN").map(PathBuf::from);
     let app = App::new(directory, binary).map_err(|e| e.message)?;
+    let arguments = std::env::args().collect::<Vec<_>>();
+    if let Some(position) = arguments
+        .iter()
+        .position(|argument| argument == "--create-admin")
+    {
+        let username = arguments
+            .get(position + 1)
+            .ok_or("--create-admin requires an account name")?;
+        let mut password = String::new();
+        std::io::stdin().take(1026).read_to_string(&mut password)?;
+        let password = password.trim_end_matches(['\r', '\n']);
+        auth::bootstrap_admin(&app.directory, username, password).map_err(|error| error.message)?;
+        eprintln!("Administrator created. Restart the manager to enable authentication.");
+        return Ok(());
+    }
+    let public_url = std::env::var("FC_PUBLIC_URL").ok();
+    let authentication =
+        auth::Auth::load(&app.directory, public_url.as_deref()).map_err(|error| error.message)?;
+    authentication
+        .validate_bind(bind)
+        .await
+        .map_err(|error| error.message)?;
     if let Some(binary) = &app.binary {
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -58,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("Factorio Control listening on http://{bind}");
     let shutdown_app = app.clone();
-    let result = axum::serve(listener, api::router(app.clone(), std::path::Path::new("web/dist")))
+    let result = axum::serve(listener, api::router_with_auth(app.clone(), std::path::Path::new("web/dist"), authentication))
         .with_graceful_shutdown(async move {
             let mut terminate = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(signal) => signal,

@@ -9,6 +9,7 @@ import {
 } from "@tanstack/react-query";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { ArrowUp, Download, RefreshCw, Upload } from "lucide-react";
+import { useAccess } from "../authApi";
 import { api, ApiError, errorMessage } from "../api";
 import type {
   ModSettingsChange,
@@ -260,6 +261,7 @@ function ModWorkflows({
   document: ModsDocument;
   stopped: boolean;
 }) {
+  const { canOperate } = useAccess();
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<"portal" | "bulk" | "packs" | "files">(
     "portal",
@@ -375,7 +377,7 @@ function ModWorkflows({
                 </button>
               ))}
             </div>
-            {!stopped && (
+            {!stopped && canOperate && (
               <p className="muted">Stop the server before making changes.</p>
             )}
             {tab === "portal" && (
@@ -743,7 +745,29 @@ function ModWorkflows({
                   : "Preparing and validating changes…"}
               </p>
             )}
-            {action.isError && <Notice>{errorMessage(action.error)}</Notice>}
+            {action.isError && (
+              <Notice>
+                {errorMessage(action.error)}{" "}
+                <button
+                  className="text-button"
+                  disabled={action.isPending}
+                  onClick={() => {
+                    Promise.all([
+                      client.invalidateQueries({ queryKey: ["mods"] }),
+                      client.invalidateQueries({ queryKey: ["mod-settings"] }),
+                    ])
+                      .then(() => {
+                        action.reset();
+                        preview.reset();
+                        setConfirmation(null);
+                      })
+                      .catch(() => undefined);
+                  }}
+                >
+                  Reload mod list
+                </button>
+              </Notice>
+            )}
             {action.isSuccess && <Notice success>Changes applied.</Notice>}
             {confirmation && (
               <div className="mod-workflow-confirm">
@@ -1092,11 +1116,16 @@ export default function Mods({
   status: Status;
   active?: boolean;
 }) {
+  const { canOperate, canAdmin } = useAccess();
   const [tab, setTab] = useState<"mods" | "startup">("mods");
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const client = useQueryClient();
-  const query = useQuery({ queryKey: ["mods"], queryFn: api.mods });
+  const query = useQuery({
+    queryKey: ["mods"],
+    queryFn: api.mods,
+    enabled: active,
+  });
   const checking = useIsFetching({ queryKey: ["mod-updates"] }) > 0;
   const changing = useIsMutating({ mutationKey: ["mod-change"] }) > 0;
   const upload = useMutation({
@@ -1109,7 +1138,8 @@ export default function Mods({
         .catch(() => undefined);
     },
   });
-  const stopped = status.state === "stopped" || status.state === "failed";
+  const stopped =
+    canOperate && (status.state === "stopped" || status.state === "failed");
   return (
     <>
       <div className="tab-buttons settings-tabs">
@@ -1130,7 +1160,7 @@ export default function Mods({
           Startup settings
         </button>
       </div>
-      {!stopped && (
+      {!stopped && canOperate && (
         <div className="inline-info">
           Stop the server before changing mods or startup settings. Downloads
           remain available.
@@ -1215,9 +1245,15 @@ export default function Mods({
           <>
             {!query.data.portal_authenticated && (
               <div className="inline-info">
-                Installing updates requires a Factorio username and token in{" "}
-                <a href="#settings">Server settings</a>. Version checks work
-                without an account.
+                {canAdmin ? (
+                  <>
+                    Installing updates requires a Factorio username and token in{" "}
+                    <a href="#settings">Server settings</a>.
+                  </>
+                ) : (
+                  "Ask an administrator to configure Factorio portal credentials for installation."
+                )}{" "}
+                Version checks work without an account.
               </div>
             )}
             <section className="panel">

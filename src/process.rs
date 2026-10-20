@@ -22,6 +22,7 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
         .binary
         .as_ref()
         .ok_or_else(|| Error::bad("Configure FC_FACTORIO_BIN before starting a server"))?;
+    crate::mods::workflows::ensure_consistent(app)?;
     if let Some(version) = inner.status.version.as_deref() {
         crate::mods::validate_start(app, version)?;
     }
@@ -476,6 +477,7 @@ pub async fn create_save(app: &App, name: &str) -> Result<Save> {
         if destination.exists() {
             return Err(Error::conflict("A save with that name already exists"));
         }
+        crate::mods::workflows::ensure_consistent(app)?;
         if let Some(version) = inner.status.version.as_deref() {
             crate::mods::validate_start(app, version)?;
         }

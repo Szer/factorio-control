@@ -656,3 +656,45 @@ pub fn game_log(directory: &Path, settings: &Path) -> Result<GameLogDocument> {
         truncated,
     })
 }
+
+pub fn runtime_paths(directory: &Path, binary: Option<&Path>) -> Result<RuntimePaths> {
+    let config = directory.join("config.ini");
+    ensure_regular(&config)?;
+    let mut paths = RuntimePaths {
+        manager_data: directory.display().to_string(),
+        game_binary: binary.map(|value| value.display().to_string()),
+        config_file: config.display().to_string(),
+        read_data: "__PATH__executable__/../../data".into(),
+        write_data: directory.display().to_string(),
+    };
+    let file = match fs::File::open(&config) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 64 * 1024 {
+        return Err(Error::bad("Game configuration exceeds 64 KiB"));
+    }
+    let text =
+        String::from_utf8(bytes).map_err(|_| Error::bad("Game configuration must be UTF-8"))?;
+    let mut section = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            section = line == "[path]";
+            continue;
+        }
+        if section
+            && !line.starts_with([';', '#'])
+            && let Some((key, value)) = line.split_once('=')
+        {
+            match key.trim() {
+                "read-data" => paths.read_data = value.trim().into(),
+                "write-data" => paths.write_data = value.trim().into(),
+                _ => {}
+            }
+        }
+    }
+    Ok(paths)
+}

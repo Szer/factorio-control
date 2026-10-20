@@ -2,6 +2,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, unused_must_use)]
 
 pub mod api;
+pub mod auth;
 pub mod mod_settings;
 pub mod models;
 pub mod mods;
@@ -79,6 +80,7 @@ pub struct App {
     pub sync_progress: Arc<std::sync::Mutex<Option<mods::save_sync::SyncProgress>>>,
     pub directory: PathBuf,
     pub binary: Option<PathBuf>,
+    pub save_operations: Arc<Mutex<()>>,
 }
 pub struct Inner {
     pub status: Status,
@@ -101,6 +103,7 @@ impl App {
         Ok(Self {
             directory,
             binary,
+            save_operations: Arc::new(Mutex::new(())),
             sync_progress: Arc::new(std::sync::Mutex::new(None)),
             inner: Arc::new(Mutex::new(Inner {
                 status: Status {

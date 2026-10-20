@@ -9,6 +9,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
+import { authApi } from "../src/authApi";
 import { api, ApiError, settingsSchema } from "../src/api";
 import type { SettingsDocument, RawSettingsDocument, Status } from "../src/api";
 import SettingsPage from "../src/pages/Settings";
@@ -68,6 +69,11 @@ function mount(element: ReactElement) {
   );
 }
 beforeEach(() => {
+  vi.spyOn(authApi, "status").mockResolvedValue({
+    enabled: false,
+    user: null,
+    expires_at: null,
+  });
   Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
     configurable: true,
     value: function (this: HTMLDialogElement) {
@@ -97,6 +103,8 @@ describe("settings and administrators", () => {
         poll_interval_seconds: 2,
         ups_history_minutes: 10,
         enable_script_telemetry: false,
+        game_bind_address: "0.0.0.0",
+        game_port: 34197,
       },
     });
     let finish: ((document: RawSettingsDocument) => void) | undefined;
@@ -133,6 +141,8 @@ describe("settings and administrators", () => {
         poll_interval_seconds: 2,
         ups_history_minutes: 10,
         enable_script_telemetry: false,
+        game_bind_address: "0.0.0.0",
+        game_port: 34197,
       },
     });
     vi.spyOn(api, "saveRawSettings").mockRejectedValue(
@@ -191,6 +201,8 @@ describe("settings and administrators", () => {
         poll_interval_seconds: 2,
         ups_history_minutes: 10,
         enable_script_telemetry: false,
+        game_bind_address: "0.0.0.0",
+        game_port: 34197,
       },
     });
     vi.spyOn(api, "admins").mockResolvedValue({ revision: "one", admins: [] });
@@ -215,6 +227,7 @@ describe("settings and administrators", () => {
 
 it("starts the persisted selected save rather than the newest upload", async () => {
   vi.spyOn(api, "selection").mockResolvedValue({
+    load_latest: false,
     revision: "one",
     save: "beta.zip",
   });
@@ -317,6 +330,7 @@ it("keeps invalid raw JSON editable and does not submit it", async () => {
 
 it("shows Stop for a paused server", () => {
   vi.spyOn(api, "selection").mockResolvedValue({
+    load_latest: false,
     revision: "one",
     save: "test.zip",
   });
@@ -326,7 +340,11 @@ it("shows Stop for a paused server", () => {
 });
 
 it("does not enable Start without an explicitly selected save", async () => {
-  vi.spyOn(api, "selection").mockResolvedValue({ revision: "one", save: null });
+  vi.spyOn(api, "selection").mockResolvedValue({
+    load_latest: false,
+    revision: "one",
+    save: null,
+  });
   mount(<ServerControls status={stopped} />);
   await waitFor(() => {
     expect(
@@ -407,6 +425,8 @@ it("edits manager JSON separately, validates unknown keys, and preserves form ch
     poll_interval_seconds: 2,
     ups_history_minutes: 10,
     enable_script_telemetry: false,
+    game_bind_address: "0.0.0.0",
+    game_port: 34197,
   };
   vi.spyOn(api, "manager").mockResolvedValue({
     revision: "manager-one",
@@ -463,9 +483,18 @@ it("edits manager JSON separately, validates unknown keys, and preserves form ch
 it("accepts a 200 MiB save and previews mod sync before applying it", async () => {
   const file = new File(["zip"], "large.zip", { type: "application/zip" });
   Object.defineProperty(file, "size", { value: 200 * 1024 * 1024 });
-  const save = { name: "large.zip", size_bytes: file.size, modified_at: 1 };
+  const save = {
+    name: "large.zip",
+    size_bytes: file.size,
+    modified_at: 1,
+    revision: "save-one",
+  };
   vi.spyOn(api, "saves").mockResolvedValue([save]);
-  vi.spyOn(api, "selection").mockResolvedValue({ revision: "one", save: null });
+  vi.spyOn(api, "selection").mockResolvedValue({
+    load_latest: false,
+    revision: "one",
+    save: null,
+  });
   const upload = vi.spyOn(api, "upload").mockResolvedValue(save);
   vi.spyOn(api, "saveModPlan").mockResolvedValue({
     revision: "plan-one",
@@ -503,9 +532,13 @@ it("accepts a 200 MiB save and previews mod sync before applying it", async () =
 
 it("does not allow applying a sync plan with missing credentials", async () => {
   vi.spyOn(api, "saves").mockResolvedValue([
-    { name: "world.zip", size_bytes: 1, modified_at: 1 },
+    { name: "world.zip", size_bytes: 1, modified_at: 1, revision: "save-one" },
   ]);
-  vi.spyOn(api, "selection").mockResolvedValue({ revision: "one", save: null });
+  vi.spyOn(api, "selection").mockResolvedValue({
+    load_latest: false,
+    revision: "one",
+    save: null,
+  });
   vi.spyOn(api, "saveModPlan").mockResolvedValue({
     revision: "plan-one",
     save: "world.zip",
@@ -528,9 +561,15 @@ it("does not allow applying a sync plan with missing credentials", async () => {
 
 it("keeps sync requirements compact and closes back to the save list", async () => {
   vi.spyOn(api, "saves").mockResolvedValue([
-    { name: "large.zip", size_bytes: 200 * 1024 * 1024, modified_at: 1 },
+    {
+      name: "large.zip",
+      size_bytes: 200 * 1024 * 1024,
+      modified_at: 1,
+      revision: "save-one",
+    },
   ]);
   vi.spyOn(api, "selection").mockResolvedValue({
+    load_latest: false,
     revision: "one",
     save: "large.zip",
   });
@@ -577,9 +616,18 @@ it("keeps sync requirements compact and closes back to the save list", async () 
 
 it("shows server-reported sync progress and the current mod while downloads run", async () => {
   vi.spyOn(api, "saves").mockResolvedValue([
-    { name: "progress.zip", size_bytes: 1, modified_at: 1 },
+    {
+      name: "progress.zip",
+      size_bytes: 1,
+      modified_at: 1,
+      revision: "save-one",
+    },
   ]);
-  vi.spyOn(api, "selection").mockResolvedValue({ revision: "one", save: null });
+  vi.spyOn(api, "selection").mockResolvedValue({
+    load_latest: false,
+    revision: "one",
+    save: null,
+  });
   vi.spyOn(api, "saveModPlan").mockResolvedValue({
     revision: "plan-one",
     save: "progress.zip",

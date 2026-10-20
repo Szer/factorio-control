@@ -65,10 +65,15 @@
 }
 .auth-menu {
   position: relative;
+  min-width: 0;
 }
 .auth-menu summary {
   cursor: pointer;
   list-style: none;
+  max-width: min(40vw, 20rem);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .auth-menu summary span {
   margin-left: 6px;
@@ -99,4 +104,18 @@
   .auth-menu summary span {
     display: none;
   }
+}
+
+.auth-login .panel-header,
+.auth-account-panel .panel-header {
+  padding: 14px 20px;
+  background: #303030;
+  border-bottom: 1px solid #222;
+  color: #ffe1b3;
+}
+.auth-account-panel h2 {
+  font-size: 20px;
+}
+.auth-form label {
+  font-size: 16px;
 }

@@ -146,6 +146,7 @@ it("updates the selected version with the current document revision and checks a
 
 it("does not query release metadata while the Mods page is hidden", async () => {
   const checks = mount(false);
-  await screen.findByRole("heading", { name: /Installed mods/ });
+  await screen.findByRole("button", { name: "Installed mods" });
+  expect(api.mods).not.toHaveBeenCalled();
   expect(checks).not.toHaveBeenCalled();
 });

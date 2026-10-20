@@ -1,10 +1,10 @@
-use crate::{App, Error, Result, models::*, process, storage};
+use crate::{App, Error, Result, auth, models::*, process, storage};
 use axum::{
     Json, Router,
     body::Body,
     extract::{Path, State, rejection::JsonRejection},
     http::{Request, StatusCode, header},
-    middleware::{self, Next},
+    middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -17,6 +17,7 @@ use utoipa::OpenApi;
 #[openapi(
     paths(
         status,
+        runtime_paths,
         telemetry,
         saves,
         get_settings,
@@ -44,6 +45,20 @@ use utoipa::OpenApi;
         crate::mods::save_sync::plan,
         crate::mods::save_sync::apply,
         crate::mods::save_sync::progress,
+        crate::mods::workflows::search,
+        crate::mods::workflows::portal_versions,
+        crate::mods::workflows::install_portal,
+        crate::mods::workflows::bulk_preview,
+        crate::mods::workflows::bulk_apply,
+        crate::mods::workflows::export_list,
+        crate::mods::workflows::import_list,
+        crate::mods::workflows::packs,
+        crate::mods::workflows::create_pack,
+        crate::mods::workflows::delete_pack,
+        crate::mods::workflows::restore_pack,
+        crate::mods::workflows::remove_mod,
+        crate::mods::workflows::export_all,
+        crate::mods::workflows::operation_progress,
         crate::mods::get_mods,
         crate::mods::upload_mod,
         crate::mods::download_mod,
@@ -79,15 +94,35 @@ use utoipa::OpenApi;
         CommandResponse,
         ForceStopRequest,
         GameLogDocument,
+        RuntimePaths,
+        crate::mods::workflows::RestorePackRequest,
         ApiError
     ))
 )]
 pub struct Api;
 
 pub fn router(app: App, static_path: &std::path::Path) -> Router {
+    match auth::Auth::load(&app.directory, None) {
+        Ok(authentication) => router_with_auth(app, static_path, authentication),
+        Err(_) => Router::new().fallback(|| async {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    message: "Panel authentication configuration could not be loaded".into(),
+                }),
+            )
+        }),
+    }
+}
+pub fn router_with_auth(
+    app: App,
+    static_path: &std::path::Path,
+    authentication: auth::Auth,
+) -> Router {
     let routes = Router::new()
         .merge(crate::mods::routes())
         .route("/status", get(status))
+        .route("/runtime-paths", get(runtime_paths))
         .route("/telemetry", get(telemetry))
         .route("/saves", get(saves))
         .route("/saves/create", post(create_save))
@@ -121,100 +156,14 @@ pub fn router(app: App, static_path: &std::path::Path) -> Router {
             )
         });
     Router::new()
+        .merge(auth::routes(authentication.clone()))
         .nest("/api", routes)
         .fallback_service(
             ServeDir::new(static_path)
                 .not_found_service(ServeFile::new(static_path.join("index.html"))),
         )
-        .layer(middleware::from_fn(guard))
+        .layer(middleware::from_fn_with_state(authentication, auth::guard))
         .with_state(app)
-}
-async fn guard(request: Request<Body>, next: Next) -> Response {
-    let host = request
-        .headers()
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.parse::<axum::http::uri::Authority>().ok());
-    let valid_host = host.as_ref().is_some_and(|h| {
-        h.host() == "localhost"
-            || h.host()
-                .trim_matches(['[', ']'])
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
-    });
-    if !valid_host {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ApiError {
-                message: "Only loopback Host headers are accepted".into(),
-            }),
-        )
-            .into_response();
-    }
-    if !matches!(
-        *request.method(),
-        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
-    ) {
-        if let Some(origin) = request.headers().get(header::ORIGIN) {
-            let valid =
-                origin
-                    .to_str()
-                    .ok()
-                    .and_then(|o| url::Url::parse(o).ok())
-                    .is_some_and(|origin| {
-                        host.as_ref().is_some_and(|host| {
-                            matches!(origin.scheme(), "http" | "https")
-                                && origin.host_str().map(|h| h.trim_matches(['[', ']']))
-                                    == Some(host.host().trim_matches(['[', ']']))
-                                && origin.port_or_known_default()
-                                    == Some(host.port_u16().unwrap_or(
-                                        if origin.scheme() == "https" { 443 } else { 80 },
-                                    ))
-                        })
-                    });
-            if !valid {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(ApiError {
-                        message: "Cross-origin mutations are not accepted".into(),
-                    }),
-                )
-                    .into_response();
-            }
-        }
-        let content_type = request
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.split(';').next());
-        let zip_upload = request.method() == axum::http::Method::POST
-            && (request
-                .uri()
-                .path()
-                .strip_prefix("/api/saves/")
-                .is_some_and(|name| !name.contains('/') && name != "create")
-                || request.uri().path() == "/api/mods/upload");
-        let binary_upload = request.method() == axum::http::Method::POST
-            && request.uri().path() == "/api/mods/settings/file";
-        if content_type
-            != Some(if zip_upload {
-                "application/zip"
-            } else if binary_upload {
-                "application/octet-stream"
-            } else {
-                "application/json"
-            })
-        {
-            return (
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                Json(ApiError {
-                    message: "Unexpected request Content-Type".into(),
-                }),
-            )
-                .into_response();
-        }
-    }
-    next.run(request).await
 }
 fn json<T>(value: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
     value.map(|Json(v)| v).map_err(|e| Error {
@@ -585,5 +534,14 @@ async fn game_log(State(app): State<App>) -> Result<Json<GameLogDocument>> {
     Ok(Json(storage::game_log(
         &app.directory,
         &app.settings_path(),
+    )?))
+}
+
+#[utoipa::path(get, path="/api/runtime-paths", responses((status=200, body=RuntimePaths), (status=400, body=ApiError)))]
+async fn runtime_paths(State(app): State<App>) -> Result<Json<RuntimePaths>> {
+    let _inner = app.inner.lock().await;
+    Ok(Json(storage::runtime_paths(
+        &app.directory,
+        app.binary.as_deref(),
     )?))
 }

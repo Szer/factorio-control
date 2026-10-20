@@ -219,6 +219,7 @@ export default function Overview({
       {!selection.isPending &&
         !selection.isError &&
         !selection.data.save &&
+        !selection.data.load_latest &&
         status.state === "stopped" && (
           <div className="inline-info">
             Choose a startup save on the <a href="#saves">Saves page</a> to

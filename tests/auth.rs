@@ -1,9 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, unused_must_use)]
 
-pub use factorio_control::{Error, Result, now, storage};
-#[path = "../src/auth.rs"]
-pub mod auth;
+use factorio_control::{Error, auth, now};
 
 use auth::{Auth, Role};
 use axum::{

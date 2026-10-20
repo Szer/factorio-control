@@ -468,6 +468,7 @@ pub fn permits(role: Role, method: &Method, path: &str) -> bool {
     if [
         "/api/settings",
         "/api/manager-settings",
+        "/api/runtime-paths",
         "/api/admins",
         "/api/auth/accounts",
     ]
@@ -557,7 +558,7 @@ pub fn routes<S: Clone + Send + Sync + 'static>(auth: Auth) -> Router<S> {
         .with_state(auth)
 }
 
-#[utoipa::path(get, path="/api/auth/status", responses((status=200, body=SessionStatus)))]
+#[utoipa::path(get, path="/api/auth/status", operation_id="auth_status", responses((status=200, body=SessionStatus)))]
 pub async fn status(State(auth): State<Auth>, headers: HeaderMap) -> Result<Json<SessionStatus>> {
     let mut runtime = auth.inner.lock().await;
     auth.refresh(&mut runtime)?;

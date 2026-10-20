@@ -253,3 +253,13 @@ pub struct GameLogDocument {
 pub struct ApiError {
     pub message: String,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct RuntimePaths {
+    pub manager_data: String,
+    #[schema(required = true)]
+    pub game_binary: Option<String>,
+    pub config_file: String,
+    pub read_data: String,
+    pub write_data: String,
+}

@@ -483,7 +483,7 @@ export function AccountPanel() {
       </section>
     );
   return (
-    <section className="panel">
+    <section className="panel auth-account-panel">
       <header className="panel-header">
         <h2>Panel accounts</h2>
       </header>

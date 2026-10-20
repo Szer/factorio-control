@@ -1,3 +1,4 @@
+import { authExpired } from "./authApi";
 import { z } from "zod";
 import type { components } from "./api.generated";
 
@@ -22,6 +23,7 @@ export const saveSchema = z.object({
   name: z.string(),
   size_bytes: z.number(),
   modified_at: z.number(),
+  revision: z.string(),
 }) satisfies z.ZodType<components["schemas"]["Save"]>;
 export type Save = z.infer<typeof saveSchema>;
 const unsigned = z.number().int().min(0).max(4294967295);
@@ -72,12 +74,15 @@ export const managerSchema = z.object({
     poll_interval_seconds: z.number().int().min(1).max(60),
     ups_history_minutes: z.number().int().min(1).max(1440),
     enable_script_telemetry: z.boolean(),
+    game_bind_address: z.string().default("0.0.0.0"),
+    game_port: z.number().int().min(1).max(65535).default(34197),
   }),
 }) satisfies z.ZodType<components["schemas"]["ManagerSettingsDocument"]>;
 export type ManagerDocument = z.infer<typeof managerSchema>;
 export const selectionSchema = z.object({
   revision: z.string(),
   save: z.string().nullable(),
+  load_latest: z.boolean().default(false),
 }) satisfies z.ZodType<components["schemas"]["SaveSelectionDocument"]>;
 export const adminsSchema = z.object({
   revision: z.string(),
@@ -246,6 +251,7 @@ async function request<T>(
   const response = await fetch(url, init);
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
+    if (response.status === 401) authExpired();
     const problem = z.object({ message: z.string() }).safeParse(body);
     throw new ApiError(
       problem.success
@@ -287,8 +293,12 @@ export const api = {
     request("/api/admins", adminsSchema, json("PUT", document)),
   logs: () => request("/api/logs", z.array(logSchema)),
   telemetry: () => request("/api/telemetry", telemetrySchema),
-  start: (save: string) =>
-    request("/api/server/start", statusSchema, json("POST", { save })),
+  start: (save?: string) =>
+    request(
+      "/api/server/start",
+      statusSchema,
+      json("POST", save ? { save } : {}),
+    ),
   stop: () => request("/api/server/stop", statusSchema, json("POST", {})),
   upload: (file: File) =>
     request(`/api/saves/${encodeURIComponent(file.name)}`, saveSchema, {

@@ -9,11 +9,14 @@ import {
   RefreshCw,
   Upload,
 } from "lucide-react";
+import { useAccess } from "../authApi";
 import { api, errorMessage, formatBytes, formatDate } from "../api";
 import type { Status, SaveSyncPlan } from "../api";
+import { ArchiveSaveButton, SaveTools } from "../components/SaveTools";
 import { EmptyState, Loading, Modal, Notice } from "../components/ui";
 
 export default function Saves({ status }: { status: Status }) {
+  const { canOperate } = useAccess();
   const [syncPlan, setSyncPlan] = useState<SaveSyncPlan | null>(null);
   const [operationId, setOperationId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -71,7 +74,8 @@ export default function Saves({ status }: { status: Status }) {
         failed: "Sync failed",
       }[currentProgress.phase]
     : "Preparing sync";
-  const stopped = status.state === "stopped" || status.state === "failed";
+  const stopped =
+    canOperate && (status.state === "stopped" || status.state === "failed");
   const filtered =
     saves.data?.filter((save) =>
       save.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
@@ -93,7 +97,7 @@ export default function Saves({ status }: { status: Status }) {
   const uploadButton = (
     <button
       className="button primary"
-      disabled={upload.isPending}
+      disabled={!canOperate || upload.isPending}
       onClick={() => {
         input.current?.click();
       }}
@@ -111,6 +115,7 @@ export default function Saves({ status }: { status: Status }) {
       <input
         className="visually-hidden"
         aria-label="Upload Factorio save"
+        disabled={!canOperate}
         ref={input}
         type="file"
         accept=".zip,application/zip"
@@ -131,11 +136,37 @@ export default function Saves({ status }: { status: Status }) {
             }}
           />
         </label>
-        <div className="toolbar-actions">{uploadButton}</div>
+        <div className="toolbar-actions">
+          <SaveTools stopped={stopped} />
+          {uploadButton}
+        </div>
       </div>
       <div className="selection-banner">
         <span>Next server start</span>
-        <strong>{selection.data?.save ?? "No save selected"}</strong>
+        <strong>
+          {selection.data?.load_latest
+            ? "Latest save (including autosaves)"
+            : (selection.data?.save ?? "No save selected")}
+        </strong>
+        <button
+          className="button secondary compact-action"
+          disabled={
+            !canOperate ||
+            !selection.data ||
+            promote.isPending ||
+            selection.data.load_latest
+          }
+          onClick={() => {
+            if (selection.data)
+              promote.mutate({
+                revision: selection.data.revision,
+                save: null,
+                load_latest: true,
+              });
+          }}
+        >
+          Always load latest
+        </button>
       </div>
       {selection.isError && <Notice>{errorMessage(selection.error)}</Notice>}
       {promote.isError && (
@@ -368,11 +399,10 @@ export default function Saves({ status }: { status: Status }) {
         <section className="panel">
           <EmptyState
             icon={<Box size={32} />}
-            title="No saves uploaded"
+            title="No saves"
             action={uploadButton}
           >
-            Upload a Factorio save to continue your factory. ZIP files up to 1
-            GiB; existing saves are kept intact.
+            Create a new world or upload a Factorio ZIP up to 1 GiB.
           </EmptyState>
         </section>
       ) : (
@@ -416,30 +446,37 @@ export default function Saves({ status }: { status: Status }) {
                       <div className="row-actions">
                         <button
                           className={
+                            !selection.data?.load_latest &&
                             selection.data?.save === save.name
                               ? "button selected-save"
                               : "button secondary"
                           }
                           disabled={
+                            !canOperate ||
                             promote.isPending ||
                             !selection.data ||
-                            selection.data.save === save.name
+                            (!selection.data.load_latest &&
+                              selection.data.save === save.name)
                           }
                           onClick={() => {
                             if (selection.data)
                               promote.mutate({
                                 revision: selection.data.revision,
                                 save: save.name,
+                                load_latest: false,
                               });
                           }}
                         >
-                          {selection.data?.save === save.name
+                          {!selection.data?.load_latest &&
+                          selection.data?.save === save.name
                             ? "Selected"
                             : "Use on next start"}
                         </button>
                         <button
                           className="button secondary"
-                          disabled={review.isPending || sync.isPending}
+                          disabled={
+                            !canOperate || review.isPending || sync.isPending
+                          }
                           onClick={() => {
                             setSyncPlan(null);
                             review.mutate(save.name);
@@ -448,6 +485,23 @@ export default function Saves({ status }: { status: Status }) {
                           <RefreshCw size={16} />
                           Sync mods
                         </button>
+                        <ArchiveSaveButton
+                          name={save.name}
+                          revision={save.revision}
+                          disabled={
+                            !stopped ||
+                            (!selection.data?.load_latest &&
+                              selection.data?.save === save.name)
+                          }
+                          reason={
+                            !stopped
+                              ? "Stop the server before archiving"
+                              : !selection.data?.load_latest &&
+                                  selection.data?.save === save.name
+                                ? "Select another startup save before archiving"
+                                : undefined
+                          }
+                        />
                         <a
                           className="icon-button"
                           href={`/api/saves/${encodeURIComponent(save.name)}`}
