@@ -125,9 +125,6 @@ fn build_plan(
                 _ => SyncAction::Switch,
             }
         } else {
-            if !current.portal_authenticated {
-                blockers.push(format!("{} {} needs a download. Configure Factorio username/token, or upload that ZIP first.", item.name, item.version));
-            }
             SyncAction::Download
         };
         mods.push(SyncMod {
@@ -135,6 +132,13 @@ fn build_plan(
             version: item.version.clone(),
             action,
         });
+    }
+    let downloads = mods
+        .iter()
+        .filter(|item| matches!(item.action, SyncAction::Download))
+        .count();
+    if downloads > 0 && !current.portal_authenticated {
+        blockers.push(format!("{downloads} {} downloads. Configure Factorio username/token in Server settings, or upload the required ZIPs first.", if downloads == 1 { "mod requires" } else { "mods require" }));
     }
     let mut disable = HashSet::new();
     for item in current.mods.iter().filter(|item| item.enabled) {
@@ -494,9 +498,10 @@ mod tests {
     #[tokio::test]
     async fn missing_download_credentials_and_stale_plans_preserve_mods() -> TestResult {
         let (_temp, app) = setup().await?;
-        save(&app, &[("missing", [1, 0, 0])])?;
+        save(&app, &[("missing", [1, 0, 0]), ("another", [1, 0, 0])])?;
         let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
-        assert!(!plan.blockers.is_empty());
+        assert_eq!(plan.blockers.len(), 1);
+        assert!(plan.blockers[0].starts_with("2 mods require downloads."));
         assert!(
             apply(
                 State(app.clone()),

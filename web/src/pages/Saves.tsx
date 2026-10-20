@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { api, errorMessage, formatBytes, formatDate } from "../api";
 import type { Status, SaveSyncPlan } from "../api";
-import { EmptyState, Loading, Notice } from "../components/ui";
+import { EmptyState, Loading, Modal, Notice } from "../components/ui";
 
 export default function Saves({ status }: { status: Status }) {
   const [syncPlan, setSyncPlan] = useState<SaveSyncPlan | null>(null);
@@ -148,7 +148,9 @@ export default function Saves({ status }: { status: Status }) {
         <Notice success>{upload.data.name} is ready to load.</Notice>
       )}
       {review.isPending && <Notice>Reading the save's mod list…</Notice>}
-      {review.isError && <Notice>{errorMessage(review.error)}</Notice>}
+      {review.isError && !syncPlan && (
+        <Notice>{errorMessage(review.error)}</Notice>
+      )}
       {sync.isSuccess && (
         <Notice success>
           Mods synced. Select this save for the next server start when you are
@@ -156,64 +158,55 @@ export default function Saves({ status }: { status: Status }) {
         </Notice>
       )}
       {syncPlan && (
-        <section className="panel sync-panel" aria-label="Sync save mods">
-          <div className="section-heading">
-            <div>
-              <h2>Sync mods with {syncPlan.save}</h2>
-              <p>
-                Saved with Factorio {syncPlan.factorio_version} · Installed{" "}
-                {syncPlan.engine_version}
-              </p>
-            </div>
-          </div>
-          <div className="form-fields">
+        <Modal
+          title={`Sync mods with ${syncPlan.save}`}
+          className="sync-dialog"
+          busy={sync.isPending || review.isPending}
+          close={() => {
+            setSyncPlan(null);
+            sync.reset();
+          }}
+        >
+          <div className="sync-summary">
             <p>
-              Match the save's exact mod versions. Missing versions are
-              downloaded from the Factorio mod portal; other mods are disabled.
-              Existing ZIPs and the save are kept.
+              Factorio {syncPlan.factorio_version} → {syncPlan.engine_version}
             </p>
-            <p className="muted">
-              Bundled mods use the installed game version. Startup settings are
-              unchanged; import mod-settings.dat on the Mods page if needed.
+            <p>
+              {syncPlan.mods.length} mods ·{" "}
+              {
+                syncPlan.mods.filter((item) => item.action === "download")
+                  .length
+              }{" "}
+              downloads · {syncPlan.disable.length} to disable
             </p>
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Mod</th>
-                    <th>Version in save</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {syncPlan.mods.map((item) => (
-                    <tr key={item.name}>
-                      <td>{item.name}</td>
-                      <td>{item.version}</td>
-                      <td>
-                        {
-                          {
-                            keep: "Already matched",
-                            enable: "Enable",
-                            switch: "Switch installed version",
-                            download: "Download exact version",
-                            bundled: "Use bundled mod",
-                          }[item.action]
-                        }
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {syncPlan.disable.length > 0 && (
-              <p>
-                <strong>Will disable:</strong> {syncPlan.disable.join(", ")}
-              </p>
+          </div>
+          <div className="sync-requirements">
+            {syncPlan.blockers.length > 0 && (
+              <Notice>
+                {syncPlan.blockers[0]}
+                {syncPlan.blockers.length > 1 && (
+                  <details>
+                    <summary>
+                      {syncPlan.blockers.length - 1} more requirements
+                    </summary>
+                    <ul>
+                      {syncPlan.blockers.slice(1).map((message) => (
+                        <li key={message}>{message}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                <a
+                  className="text-button"
+                  href="#settings"
+                  onClick={() => {
+                    setSyncPlan(null);
+                  }}
+                >
+                  Open server settings
+                </a>
+              </Notice>
             )}
-            {syncPlan.blockers.map((message) => (
-              <Notice key={message}>{message}</Notice>
-            ))}
             {!stopped && <Notice>Stop the server before syncing mods.</Notice>}
             {sync.isError && (
               <Notice>
@@ -221,47 +214,97 @@ export default function Saves({ status }: { status: Status }) {
                 retrying.
               </Notice>
             )}
-            <div className="row-actions">
-              <button
-                className="button secondary"
-                disabled={sync.isPending || review.isPending}
-                onClick={() => {
-                  setSyncPlan(null);
-                  sync.reset();
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                className="button secondary"
-                disabled={sync.isPending || review.isPending}
-                onClick={() => {
-                  review.mutate(syncPlan.save);
-                }}
-              >
-                Refresh plan
-              </button>
-              <button
-                className="button primary"
-                disabled={
-                  !stopped ||
-                  sync.isPending ||
-                  review.isPending ||
-                  sync.isError ||
-                  syncPlan.blockers.length > 0
-                }
-                onClick={() => {
-                  sync.mutate({
-                    name: syncPlan.save,
-                    revision: syncPlan.revision,
-                  });
-                }}
-              >
-                {sync.isPending ? "Syncing mods…" : "Apply mod sync"}
-              </button>
-            </div>
+            {review.isError && <Notice>{errorMessage(review.error)}</Notice>}
           </div>
-        </section>
+          <div
+            className="sync-mod-list"
+            role="region"
+            aria-label="Mod changes"
+            tabIndex={0}
+          >
+            <table>
+              <thead>
+                <tr>
+                  <th>Mod</th>
+                  <th>Version in save</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {syncPlan.mods.map((item) => (
+                  <tr key={item.name}>
+                    <td>{item.name}</td>
+                    <td>{item.version}</td>
+                    <td>
+                      {
+                        {
+                          keep: "Already matched",
+                          enable: "Enable",
+                          switch: "Switch installed version",
+                          download: "Download exact version",
+                          bundled: "Use bundled mod",
+                        }[item.action]
+                      }
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {syncPlan.disable.length > 0 && (
+              <div className="sync-details">
+                <strong>Will disable:</strong> {syncPlan.disable.join(", ")}
+              </div>
+            )}
+          </div>
+          <details className="sync-explanation">
+            <summary>How sync works</summary>
+            <p>
+              Matches exact mod versions, downloads missing ZIPs, and disables
+              extra mods. Existing ZIPs and the save are kept. Bundled mods use
+              the installed game version. Startup settings can be imported
+              separately from mod-settings.dat.
+            </p>
+          </details>
+          <div className="sync-actions">
+            <button
+              className="button secondary"
+              disabled={sync.isPending || review.isPending}
+              onClick={() => {
+                setSyncPlan(null);
+                sync.reset();
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              className="button secondary"
+              disabled={sync.isPending || review.isPending}
+              onClick={() => {
+                review.mutate(syncPlan.save);
+              }}
+            >
+              Refresh plan
+            </button>
+            <button
+              className="button primary"
+              disabled={
+                !stopped ||
+                sync.isPending ||
+                review.isPending ||
+                sync.isError ||
+                syncPlan.blockers.length > 0
+              }
+              onClick={() => {
+                sync.mutate({
+                  name: syncPlan.save,
+                  revision: syncPlan.revision,
+                });
+              }}
+            >
+              {sync.isPending ? "Syncing mods…" : "Apply mod sync"}
+            </button>
+          </div>
+        </Modal>
       )}
       {saves.isPending ? (
         <Loading />

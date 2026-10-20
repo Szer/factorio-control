@@ -1996,9 +1996,98 @@ summary {
   color: #bbb;
 }
 
-.sync-panel {
-  margin-bottom: 16px;
+.sync-dialog {
+  width: min(900px, calc(100% - 24px));
+  height: min(760px, calc(100dvh - 24px));
+  max-height: calc(100dvh - 24px);
+  padding: 0;
+  overflow: hidden;
 }
-.sync-panel .row-actions {
+.sync-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.sync-dialog > header {
+  padding: 14px 16px;
+  background: #303030;
+  border-bottom: 1px solid #171717;
+  flex-shrink: 0;
+}
+.sync-dialog h2 {
+  font-size: 20px;
+  overflow-wrap: anywhere;
+}
+.sync-summary {
+  padding: 10px 16px;
+  display: flex;
   flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 16px;
+  font-size: 14px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.sync-requirements {
+  max-height: 22dvh;
+  overflow: auto;
+  flex-shrink: 0;
+}
+.sync-requirements .notice {
+  margin: 0 12px 10px;
+}
+.sync-requirements .text-button {
+  display: block;
+  margin-top: 6px;
+}
+.sync-requirements ul {
+  padding-left: 20px;
+}
+.sync-mod-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  border-block: 1px solid #171717;
+}
+.sync-mod-list th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.sync-mod-list td {
+  padding-block: 8px;
+}
+.sync-mod-list td:first-child {
+  min-width: 14rem;
+  overflow-wrap: anywhere;
+}
+.sync-details {
+  padding: 12px 16px;
+  overflow-wrap: anywhere;
+}
+.sync-explanation {
+  padding: 8px 16px;
+  font-size: 14px;
+  max-height: 6rem;
+  overflow: auto;
+  flex-shrink: 0;
+}
+.sync-explanation summary,
+.sync-requirements summary {
+  cursor: pointer;
+}
+.sync-explanation p {
+  margin-top: 6px;
+  color: var(--muted);
+}
+.sync-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #303030;
+  border-top: 1px solid #171717;
+  flex-shrink: 0;
+}
+.sync-actions .primary {
+  margin-left: auto;
 }

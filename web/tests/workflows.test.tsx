@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cleanup,
   render,
@@ -67,6 +67,20 @@ function mount(element: ReactElement) {
     <QueryClientProvider client={client}>{element}</QueryClientProvider>,
   );
 }
+beforeEach(() => {
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value: function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    },
+  });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value: function (this: HTMLDialogElement) {
+      this.removeAttribute("open");
+    },
+  });
+});
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -217,18 +231,6 @@ it("starts the persisted selected save rather than the newest upload", async () 
         .getByRole("button", { name: "Start server" })
         .hasAttribute("disabled"),
     ).toBe(false);
-  });
-  Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
-    configurable: true,
-    value: function (this: HTMLDialogElement) {
-      this.setAttribute("open", "");
-    },
-  });
-  Object.defineProperty(HTMLDialogElement.prototype, "close", {
-    configurable: true,
-    value: function (this: HTMLDialogElement) {
-      this.removeAttribute("open");
-    },
   });
   await user.click(screen.getByRole("button", { name: "Start server" }));
   const dialog = screen.getByRole("dialog");
@@ -488,7 +490,7 @@ it("accepts a 200 MiB save and previews mod sync before applying it", async () =
   await user.click(await screen.findByRole("button", { name: "Sync mods" }));
   await screen.findByRole("heading", { name: "Sync mods with large.zip" });
   expect(screen.getByText("Download exact version")).toBeDefined();
-  expect(screen.getByText(/extra/)).toBeDefined();
+  expect(screen.getByText(/Will disable:/)).toBeDefined();
   expect(sync).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Apply mod sync" }));
   await waitFor(() => {
@@ -522,4 +524,53 @@ it("does not allow applying a sync plan with missing credentials", async () => {
       .getByRole("button", { name: "Apply mod sync" })
       .hasAttribute("disabled"),
   ).toBe(true);
+});
+
+it("keeps sync requirements compact and closes back to the save list", async () => {
+  vi.spyOn(api, "saves").mockResolvedValue([
+    { name: "large.zip", size_bytes: 200 * 1024 * 1024, modified_at: 1 },
+  ]);
+  vi.spyOn(api, "selection").mockResolvedValue({
+    revision: "one",
+    save: "large.zip",
+  });
+  vi.spyOn(api, "saveModPlan").mockResolvedValue({
+    revision: "plan-one",
+    save: "large.zip",
+    factorio_version: "2.1.19",
+    engine_version: "2.1.23",
+    mods: Array.from({ length: 30 }, (_, index) => ({
+      name: `demo-${String(index)}`,
+      version: "1.0.0",
+      action: "download" as const,
+    })),
+    disable: [],
+    blockers: Array.from(
+      { length: 30 },
+      (_, index) => `demo-${String(index)} requires a download.`,
+    ),
+  });
+  mount(<Saves status={stopped} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Sync mods" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Sync mods with large.zip",
+  });
+  expect(within(dialog).getAllByRole("alert")).toHaveLength(1);
+  expect(within(dialog).getByText("29 more requirements")).toBeDefined();
+  const details = dialog.querySelector("details");
+  expect(details?.open).toBe(false);
+  expect(
+    within(dialog)
+      .getByRole("button", { name: "Apply mod sync" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  expect(
+    within(dialog).getByRole("region", { name: "Mod changes" }),
+  ).toBeDefined();
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(
+    screen.getByRole("link", { name: "Download large.zip" }),
+  ).toBeDefined();
 });
