@@ -29,7 +29,7 @@ fn archive(
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
     writer.start_file(format!("demo_{version}/info.json"), options)?;
-    writer.write_all(&serde_json::to_vec(&serde_json::json!({"name":"demo","version":version,"title":"Demo", "factorio_version":"2.1", "dependencies":dependencies}))?)?;
+    writer.write_all(&serde_json::to_vec(&serde_json::json!({"name":"demo","version":version,"title":"Demo","author":"Synthetic fixture", "factorio_version":"2.1", "dependencies":dependencies}))?)?;
     writer.start_file(
         extra_path.map_or_else(|| format!("demo_{version}/data.lua"), String::from),
         options,
@@ -327,6 +327,7 @@ async fn routes_require_revisions_and_stopped_server_and_roundtrip_downloads() -
     let dir = tempfile::tempdir()?;
     let app = App::new(dir.path().into(), None).map_err(app_error)?;
     let initial = mods::list(&app).map_err(app_error)?;
+    app.inner.lock().await.status.version = Some("2.1.23".into());
     let router = mods::routes().with_state(app.clone());
     let bytes = archive("1.0.0", &["base"], None)?;
     let missing_revision = router
@@ -445,7 +446,7 @@ fn archive_rejects_zip_bombs_links_and_crc_damage_but_allows_arbitrary_root() ->
             .compression_method(zip::CompressionMethod::Stored);
         writer.start_file("unrelated-root/info.json", options)?;
         writer.write_all(
-            br#"{"name":"demo","version":"1.0.0","title":"Demo","factorio_version":"2.1"}"#,
+            br#"{"name":"demo","version":"1.0.0","title":"Demo","author":"Synthetic fixture","factorio_version":"2.1"}"#,
         )?;
         match scenario {
             "bomb" => {
@@ -484,5 +485,193 @@ fn archive_rejects_zip_bombs_links_and_crc_damage_but_allows_arbitrary_root() ->
             );
         }
     }
+    Ok(())
+}
+
+fn metadata_archive(info: &serde_json::Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    writer.start_file(
+        "fixture/info.json",
+        zip::write::SimpleFileOptions::default(),
+    )?;
+    writer.write_all(&serde_json::to_vec(info)?)?;
+    Ok(writer.finish()?.into_inner())
+}
+fn mod_metadata(name: &str, dependencies: &[&str]) -> serde_json::Value {
+    serde_json::json!({"name":name,"version":"1.0.0","title":"Fixture","author":"Fixture author","factorio_version":"2.1","dependencies":dependencies})
+}
+#[test]
+fn required_metadata_and_version_bounds_match_factorio() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let app = App::new(dir.path().into(), None).map_err(app_error)?;
+    let initial = mods::list(&app).map_err(app_error)?;
+    let mut missing_author = mod_metadata("demo", &["base"]);
+    if let Some(object) = missing_author.as_object_mut() {
+        object.remove("author");
+    }
+    assert!(
+        mods::install(
+            &app,
+            &initial.revision,
+            &metadata_archive(&missing_author)?,
+            Some("2.1.23")
+        )
+        .is_err()
+    );
+    for author in [
+        serde_json::json!(["Author"]),
+        serde_json::Value::Null,
+        serde_json::json!(42),
+    ] {
+        let mut info = mod_metadata("demo", &["base"]);
+        info["author"] = author;
+        assert!(
+            mods::install(
+                &app,
+                &initial.revision,
+                &metadata_archive(&info)?,
+                Some("2.1.23")
+            )
+            .is_err()
+        );
+    }
+    for version in ["65536.0.0", "0.65536.0", "0.0.65536", "1.0", "1.0.0.0"] {
+        let mut info = mod_metadata("demo", &["base"]);
+        info["version"] = version.into();
+        assert!(
+            mods::install(
+                &app,
+                &initial.revision,
+                &metadata_archive(&info)?,
+                Some("2.1.23")
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        mods::install(
+            &app,
+            &initial.revision,
+            &metadata_archive(&mod_metadata("recycler", &["base"]))?,
+            Some("2.1.23")
+        )
+        .is_err()
+    );
+    let mut info = mod_metadata("demo", &["base>=2.1.0"]);
+    info["version"] = "65535.65535.65535".into();
+    mods::install(
+        &app,
+        &initial.revision,
+        &metadata_archive(&info)?,
+        Some("2.1.23"),
+    )
+    .map_err(app_error)?;
+    Ok(())
+}
+#[test]
+fn rejects_present_optional_dependency_cycles_but_allows_unordered_edges() -> TestResult {
+    for prefix in ["?", "(?)", "+"] {
+        let dir = tempfile::tempdir()?;
+        let app = App::new(dir.path().into(), None).map_err(app_error)?;
+        let initial = mods::list(&app).map_err(app_error)?;
+        let dependency = format!("{prefix} a-demo>=1.0.0");
+        let b = metadata_archive(&mod_metadata("b-demo", &[&dependency]))?;
+        let after_b =
+            mods::install(&app, &initial.revision, &b, Some("2.1.23")).map_err(app_error)?;
+        let a = metadata_archive(&mod_metadata("a-demo", &["b-demo"]))?;
+        let error = mods::install(&app, &after_b.revision, &a, Some("2.1.23"))
+            .err()
+            .ok_or("accepted cyclic dependency")?;
+        assert!(error.message.contains("cycle"));
+        assert_eq!(
+            mods::list(&app).map_err(app_error)?.revision,
+            after_b.revision
+        );
+        let a_unordered = metadata_archive(&mod_metadata("a-demo", &["~b-demo>=1.0.0"]))?;
+        mods::install(&app, &after_b.revision, &a_unordered, Some("2.1.23")).map_err(app_error)?;
+        mods::validate_start(&app, "2.1.23").map_err(app_error)?;
+        fs::write(dir.path().join("mods/a-demo_1.0.0.zip"), &a)?;
+        assert!(mods::validate_start(&app, "2.1.23").is_err());
+    }
+    Ok(())
+}
+#[test]
+fn detects_installed_bundled_dependencies_and_honors_explicit_disabling() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let game = dir.path().join("factorio");
+    let binary = game.join("bin/x64/factorio");
+    fs::create_dir_all(binary.parent().ok_or("no binary parent")?)?;
+    fs::write(&binary, b"synthetic binary")?;
+    for name in ["base", "quality", "space-age", "elevated-rails", "recycler"] {
+        let path = game.join("data").join(name);
+        fs::create_dir_all(&path)?;
+        fs::write(
+            path.join("info.json"),
+            serde_json::to_vec(&serde_json::json!({"name":name,"version":"2.1.23"}))?,
+        )?;
+    }
+    let app = App::new(dir.path().join("manager"), Some(binary)).map_err(app_error)?;
+    let initial = mods::list(&app).map_err(app_error)?;
+    let bytes = metadata_archive(&mod_metadata(
+        "demo",
+        &["quality>=2.1.0", "space-age", "recycler"],
+    ))?;
+    mods::install(&app, &initial.revision, &bytes, Some("2.1.23")).map_err(app_error)?;
+    mods::validate_start(&app, "2.1.23").map_err(app_error)?;
+    assert!(mods::validate_start(&app, "2.0.76").is_err());
+    let path = app.directory.join("mods/mod-list.json");
+    let mut document: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    if let Some(entries) = document["mods"].as_array_mut() {
+        entries.push(serde_json::json!({"name":"quality","enabled":false}));
+    }
+    fs::write(&path, serde_json::to_vec(&document)?)?;
+    assert!(mods::validate_start(&app, "2.1.23").is_err());
+    Ok(())
+}
+#[tokio::test]
+async fn unknown_binary_version_cannot_bypass_http_mod_compatibility_checks() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let app = App::new(dir.path().into(), None).map_err(app_error)?;
+    let initial = mods::list(&app).map_err(app_error)?;
+    let bytes = archive("1.0.0", &["base"], None)?;
+    let installed =
+        mods::install(&app, &initial.revision, &bytes, Some("2.1.23")).map_err(app_error)?;
+    let router = mods::routes().with_state(app.clone());
+    let requests = [
+        Request::builder()
+            .method("POST")
+            .uri("/mods/upload")
+            .header("if-match", &installed.revision)
+            .body(Body::from(archive("1.1.0", &["base"], None)?))?,
+        Request::builder()
+            .uri("/mods/demo/updates")
+            .body(Body::empty())?,
+        Request::builder()
+            .method("POST")
+            .uri("/mods/demo/update")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&mods::ModUpdateRequest {
+                revision: installed.revision.clone(),
+                version: "1.1.0".into(),
+            })?))?,
+        Request::builder()
+            .method("PUT")
+            .uri("/mods/demo/enabled")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&mods::ModEnabledRequest {
+                revision: installed.revision.clone(),
+                enabled: false,
+            })?))?,
+    ];
+    for request in requests {
+        let response = router.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = String::from_utf8(to_bytes(response.into_body(), 4096).await?.to_vec())?;
+        assert!(body.contains("binary version is unavailable"));
+    }
+    assert_eq!(
+        mods::list(&app).map_err(app_error)?.revision,
+        installed.revision
+    );
     Ok(())
 }

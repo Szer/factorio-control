@@ -77,8 +77,7 @@ struct ModInfo {
     name: String,
     version: String,
     title: String,
-    #[serde(default)]
-    author: serde_json::Value,
+    author: String,
     #[serde(default)]
     description: String,
     #[serde(default = "default_factorio_version")]
@@ -140,6 +139,9 @@ fn version(value: &str) -> Result<[u32; 3]> {
         *item = part
             .parse()
             .map_err(|_| Error::bad("Invalid mod version"))?;
+        if *item > 65535 {
+            return Err(Error::bad("Mod version components must be 0–65535"));
+        }
     }
     if parts.next().is_some() {
         return Err(Error::bad("Invalid mod version"));
@@ -153,7 +155,7 @@ fn family(value: &str) -> Option<(u32, u32)> {
 fn protected(name: &str) -> bool {
     matches!(
         name,
-        "base" | "core" | "space-age" | "quality" | "elevated-rails"
+        "base" | "core" | "space-age" | "quality" | "elevated-rails" | "recycler"
     )
 }
 fn validate_info(info: &ModInfo) -> Result<()> {
@@ -166,6 +168,7 @@ fn validate_info(info: &ModInfo) -> Result<()> {
         || info.dependencies.len() > 1000
         || info.dependencies.iter().any(|d| d.len() > 1024)
         || family(&info.factorio_version).is_none()
+        || info.factorio_version.split('.').count() != 2
     {
         return Err(Error::bad("Invalid mod metadata"));
     }
@@ -277,6 +280,54 @@ pub fn directory(app: &App) -> Result<PathBuf> {
     storage::ensure_directory(&path)?;
     Ok(path)
 }
+fn bundled_mods(app: &App) -> Result<BTreeMap<String, String>> {
+    let mut bundled = BTreeMap::new();
+    let Some(binary) = app.binary.as_ref() else {
+        return Ok(bundled);
+    };
+    let binary = match binary.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(bundled),
+        Err(error) => return Err(error.into()),
+    };
+    let Some(root) = binary
+        .parent()
+        .and_then(FsPath::parent)
+        .and_then(FsPath::parent)
+    else {
+        return Ok(bundled);
+    };
+    let data = root.join("data");
+    if !data.exists() {
+        return Ok(bundled);
+    }
+    storage::ensure_directory(&data)?;
+    #[derive(Deserialize)]
+    struct Builtin {
+        name: String,
+        version: String,
+    }
+    for entry in fs::read_dir(data)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let (_, bytes) = storage::read_document(&entry.path().join("info.json"))?;
+        let Some(bytes) = bytes else {
+            continue;
+        };
+        let info: Builtin = serde_json::from_slice(&bytes)?;
+        if info.name == "core" {
+            continue;
+        }
+        if !valid_name(&info.name) {
+            return Err(Error::bad("Invalid bundled mod name"));
+        }
+        version(&info.version)?;
+        bundled.insert(info.name, info.version);
+    }
+    Ok(bundled)
+}
 fn read_list(path: &FsPath) -> Result<(ModList, String)> {
     let (revision, bytes) = storage::read_document(&path.join("mod-list.json"))?;
     let list: ModList = match bytes {
@@ -368,22 +419,13 @@ pub fn list(app: &App) -> Result<ModsDocument> {
         {
             continue;
         }
-        let author = match info.author {
-            serde_json::Value::String(value) => value,
-            serde_json::Value::Array(values) => values
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-            _ => String::new(),
-        };
         selected.insert(
             info.name.clone(),
             InstalledMod {
                 name: info.name,
                 version: info.version,
                 title: info.title,
-                author,
+                author: info.author,
                 description: info.description,
                 factorio_version: info.factorio_version,
                 dependencies: info.dependencies,
@@ -442,16 +484,35 @@ fn check_compatibility(info: &ModInfo, engine: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
+fn known_engine(inner: &crate::Inner) -> Result<&str> {
+    inner.status.version.as_deref().filter(|value| version(value).is_ok()).ok_or_else(|| Error::conflict("Factorio binary version is unavailable. Configure a working binary and restart the manager before changing or checking mods"))
+}
+fn check_enabled_compatibility(mods: &[InstalledMod], engine: &str) -> Result<()> {
+    version(engine)?;
+    for item in mods.iter().filter(|item| item.enabled) {
+        if family(&item.factorio_version) != family(engine) {
+            return Err(Error::bad(&format!(
+                "{} targets Factorio {}, but the configured binary is {engine}",
+                item.name, item.factorio_version
+            )));
+        }
+    }
+    Ok(())
+}
 fn check_dependencies(
     mods: &[InstalledMod],
     mod_list: &ModList,
     engine: Option<&str>,
+    bundled: &BTreeMap<String, String>,
 ) -> Result<()> {
+    let mut edges: BTreeMap<&str, HashSet<&str>> = BTreeMap::new();
     for item in mods.iter().filter(|item| item.enabled) {
+        edges.entry(&item.name).or_default();
         for dependency in &item.dependencies {
             let mut text = dependency.trim();
             let optional = text.starts_with(['?', '+']) || text.starts_with("(?)");
             let incompatible = text.starts_with('!');
+            let unordered = text.starts_with('~');
             if let Some(rest) = text.strip_prefix("(?)") {
                 text = rest.trim();
             } else if text.starts_with(['?', '!', '~', '+']) {
@@ -460,27 +521,51 @@ fn check_dependencies(
                     .ok_or_else(|| Error::bad("Invalid mod dependency"))?
                     .trim();
             }
-            let mut parts = text.split_whitespace();
-            let name = parts
-                .next()
-                .ok_or_else(|| Error::bad("Empty mod dependency"))?;
+            let (name, comparison) = match text.find(['<', '>', '=']) {
+                Some(index) => (
+                    text.get(..index)
+                        .ok_or_else(|| Error::bad("Invalid mod dependency"))?
+                        .trim(),
+                    text.get(index..)
+                        .ok_or_else(|| Error::bad("Invalid mod dependency"))?
+                        .trim(),
+                ),
+                None => (text, ""),
+            };
             if !valid_name(name) {
                 return Err(Error::bad("Unsupported mod dependency syntax"));
             }
-            let operator = parts.next();
-            let required = parts.next();
-            if parts.next().is_some() || operator.is_some() != required.is_some() {
-                return Err(Error::bad("Unsupported mod dependency syntax"));
-            }
+            let constraint = if comparison.is_empty() {
+                None
+            } else {
+                let operator_len = if comparison.starts_with("<=") || comparison.starts_with(">=") {
+                    2
+                } else {
+                    1
+                };
+                let operator = comparison
+                    .get(..operator_len)
+                    .ok_or_else(|| Error::bad("Invalid dependency comparison"))?;
+                let required = comparison
+                    .get(operator_len..)
+                    .ok_or_else(|| Error::bad("Invalid dependency version"))?
+                    .trim();
+                Some((operator, version(required)?))
+            };
             let installed = mods
                 .iter()
                 .find(|candidate| candidate.name == name && candidate.enabled);
-            let built_in = protected(name)
-                && (name == "base"
-                    || mod_list
-                        .mods
-                        .iter()
-                        .any(|entry| entry.name == name && entry.enabled));
+            let builtin_enabled = mod_list
+                .mods
+                .iter()
+                .find(|entry| entry.name == name)
+                .is_none_or(|entry| entry.enabled);
+            let builtin_version = bundled.get(name).map(String::as_str).or(if name == "base" {
+                engine
+            } else {
+                None
+            });
+            let built_in = builtin_enabled && (builtin_version.is_some() || name == "base");
             let present = installed.is_some() || built_in;
             if incompatible && present {
                 return Err(Error::bad(&format!(
@@ -497,17 +582,19 @@ fn check_dependencies(
                     item.name
                 )));
             }
-            if let (Some(operator), Some(required)) = (operator, required) {
-                let required = version(required)?;
+            if !unordered && let Some(installed) = installed {
+                edges.entry(&item.name).or_default().insert(&installed.name);
+            }
+            if let Some((operator, required)) = constraint {
                 let Some(actual) = installed
                     .map(|candidate| candidate.version.as_str())
-                    .or(if built_in { engine } else { None })
+                    .or(builtin_version)
                 else {
                     continue;
                 };
                 let actual = version(actual)?;
                 let satisfied = match operator {
-                    "=" | "==" => actual == required,
+                    "=" => actual == required,
                     ">=" => actual >= required,
                     ">" => actual > required,
                     "<=" => actual <= required,
@@ -523,7 +610,43 @@ fn check_dependencies(
             }
         }
     }
+    while !edges.is_empty() {
+        let ready: Vec<&str> = edges
+            .iter()
+            .filter(|(_, dependencies)| dependencies.is_empty())
+            .map(|(name, _)| *name)
+            .collect();
+        if ready.is_empty() {
+            return Err(Error::bad(
+                "Enabled mods contain a dependency load-order cycle",
+            ));
+        }
+        for name in ready {
+            edges.remove(name);
+            for dependencies in edges.values_mut() {
+                dependencies.remove(name);
+            }
+        }
+    }
     Ok(())
+}
+pub fn validate_start(app: &App, engine: &str) -> Result<()> {
+    let document = list(app)?;
+    let (mod_list, _) = read_list(&directory(app)?)?;
+    let bundled = bundled_mods(app)?;
+    for entry in mod_list.mods.iter().filter(|entry| entry.enabled) {
+        if !protected(&entry.name)
+            && !bundled.contains_key(&entry.name)
+            && !document.mods.iter().any(|item| item.name == entry.name)
+        {
+            return Err(Error::bad(&format!(
+                "Enabled mod {} is missing its selected ZIP",
+                entry.name
+            )));
+        }
+    }
+    check_enabled_compatibility(&document.mods, engine)?;
+    check_dependencies(&document.mods, &mod_list, Some(engine), &bundled)
 }
 pub fn install(
     app: &App,
@@ -565,7 +688,7 @@ pub fn install(
         name: info.name.clone(),
         version: info.version.clone(),
         title: info.title.clone(),
-        author: String::new(),
+        author: info.author.clone(),
         description: info.description.clone(),
         factorio_version: info.factorio_version.clone(),
         dependencies: info.dependencies.clone(),
@@ -573,7 +696,7 @@ pub fn install(
         file_name: file_name.clone(),
         size_bytes: bytes.len() as u64,
     });
-    check_dependencies(&candidates, &mod_list, engine)?;
+    check_dependencies(&candidates, &mod_list, engine, &bundled_mods(app)?)?;
     let list_bytes = serde_json::to_vec_pretty(&mod_list)?;
     storage::atomic_write(&target, bytes, false)?;
     if let Err(error) = storage::atomic_write(&path.join("mod-list.json"), &list_bytes, true) {
@@ -648,7 +771,7 @@ pub async fn upload_mod(
             &app,
             expected(&headers)?,
             &bytes,
-            inner.status.version.as_deref(),
+            Some(known_engine(&inner)?),
         )?),
     ))
 }
@@ -700,7 +823,9 @@ pub async fn set_enabled(
             candidate.enabled = input.enabled;
         }
     }
-    check_dependencies(&candidates, &mod_list, inner.status.version.as_deref())?;
+    let engine = known_engine(&inner)?;
+    check_enabled_compatibility(&candidates, engine)?;
+    check_dependencies(&candidates, &mod_list, Some(engine), &bundled_mods(&app)?)?;
     storage::atomic_write(
         &path.join("mod-list.json"),
         &serde_json::to_vec_pretty(&mod_list)?,
@@ -859,7 +984,7 @@ fn newest<'a>(
         })
         .max_by_key(|item| version(&item.version).ok())
 }
-#[utoipa::path(get, path="/api/mods/{name}/updates", params(("name"=String, Path)), responses((status=200, body=ModUpdates), (status=400, body=ApiError), (status=502, body=ApiError)))]
+#[utoipa::path(get, path="/api/mods/{name}/updates", params(("name"=String, Path)), responses((status=200, body=ModUpdates), (status=400, body=ApiError), (status=409, body=ApiError), (status=502, body=ApiError)))]
 pub async fn get_updates(
     State(app): State<App>,
     Path(name): Path<String>,
@@ -872,11 +997,7 @@ pub async fn get_updates(
             .into_iter()
             .find(|item| item.name == name)
             .ok_or_else(|| Error::bad("Mod not installed"))?;
-        let engine = inner
-            .status
-            .version
-            .clone()
-            .unwrap_or_else(|| installed.factorio_version.clone());
+        let engine = known_engine(&inner)?.to_owned();
         (installed, engine, document.portal_authenticated)
     };
     let releases = releases(&client()?, &name).await?;
@@ -910,11 +1031,7 @@ pub async fn update_mod(
             .into_iter()
             .find(|item| item.name == name)
             .ok_or_else(|| Error::bad("Mod not installed"))?;
-        let engine = inner
-            .status
-            .version
-            .clone()
-            .unwrap_or_else(|| installed.factorio_version.clone());
+        let engine = known_engine(&inner)?.to_owned();
         let (username, token) = credentials(&app)?.ok_or_else(|| Error::bad("Portal downloads require Factorio username/token in server settings or FACTORIO_USERNAME/FACTORIO_TOKEN. You can upload a newer ZIP without credentials."))?;
         (installed, engine, username, token)
     };
@@ -957,5 +1074,10 @@ pub async fn update_mod(
     }
     let inner = app.inner.lock().await;
     stopped(&inner)?;
-    Ok(Json(install(&app, &input.revision, &bytes, Some(&engine))?))
+    Ok(Json(install(
+        &app,
+        &input.revision,
+        &bytes,
+        Some(known_engine(&inner)?),
+    )?))
 }
