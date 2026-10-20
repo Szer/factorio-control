@@ -1,3 +1,4 @@
+import { TestAccess } from "./access";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   cleanup,
@@ -29,7 +30,9 @@ function mount(element: ReactElement) {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={client}>{element}</QueryClientProvider>,
+    <QueryClientProvider client={client}>
+      <TestAccess>{element}</TestAccess>
+    </QueryClientProvider>,
   );
 }
 beforeEach(() => {

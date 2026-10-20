@@ -809,6 +809,7 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         Account: {
+            must_change_password: boolean;
             role: components["schemas"]["Role"];
             username: string;
         };
@@ -1118,7 +1119,6 @@ export interface components {
         /** @enum {string} */
         ServerState: "stopped" | "starting" | "running" | "paused" | "stopping" | "failed";
         SessionStatus: {
-            enabled: boolean;
             /** Format: int64 */
             expires_at?: number | null;
             user?: null | components["schemas"]["Account"];

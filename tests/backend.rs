@@ -13,6 +13,8 @@ use std::{
 };
 use tower::ServiceExt;
 
+mod support;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 fn app_error(error: factorio_control::Error) -> std::io::Error {
     std::io::Error::other(error.message)
@@ -79,7 +81,8 @@ fn rejects_traversal_symlinks_and_invalid_archives() -> TestResult {
 async fn api_rejects_cross_origin_and_bad_content_types() -> TestResult {
     let dir = tempfile::tempdir()?;
     let app = App::new(dir.path().into(), None).map_err(app_error)?;
-    let router = api::router(app, dir.path());
+    let router =
+        support::authenticated(api::router(app.clone(), dir.path()), &app.directory).await?;
     for (origin, content_type, expected) in [
         (
             "https://example.invalid",
@@ -195,7 +198,8 @@ async fn process_failure_is_reported_and_logs_are_bounded() -> TestResult {
 async fn upload_is_validated_never_overwrites_and_downloads_exact_bytes() -> TestResult {
     let dir = tempfile::tempdir()?;
     let app = App::new(dir.path().join("data"), None).map_err(app_error)?;
-    let router = api::router(app, dir.path());
+    let router =
+        support::authenticated(api::router(app.clone(), dir.path()), &app.directory).await?;
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     zip.start_file("world/level.dat0", zip::write::SimpleFileOptions::default())?;
     zip.write_all(b"synthetic world")?;
@@ -270,7 +274,8 @@ async fn save_upload_streams_two_hundred_mib_without_content_length() -> TestRes
     let size = file.metadata()?.len();
     let app = App::new(dir.path().join("data"), None).map_err(app_error)?;
     let destination = app.saves_path().join("large.zip");
-    let router = api::router(app, dir.path());
+    let router =
+        support::authenticated(api::router(app.clone(), dir.path()), &app.directory).await?;
     let stream = tokio_util::io::ReaderStream::with_capacity(
         tokio::fs::File::open(source.path()).await?,
         256 * 1024,
@@ -290,7 +295,8 @@ async fn save_upload_rechecks_conflicts_without_holding_app_lock() -> TestResult
     let dir = tempfile::tempdir()?;
     let app = App::new(dir.path().join("data"), None).map_err(app_error)?;
     let saves = app.saves_path();
-    let router = api::router(app.clone(), dir.path());
+    let router =
+        support::authenticated(api::router(app.clone(), dir.path()), &app.directory).await?;
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     zip.start_file("world/level.dat0", zip::write::SimpleFileOptions::default())?;
     zip.write_all(b"synthetic world")?;
@@ -322,7 +328,8 @@ async fn cancelled_invalid_and_declared_oversize_uploads_leave_no_files() -> Tes
     let dir = tempfile::tempdir()?;
     let app = App::new(dir.path().join("data"), None).map_err(app_error)?;
     let saves = app.saves_path();
-    let router = api::router(app, dir.path());
+    let router =
+        support::authenticated(api::router(app.clone(), dir.path()), &app.directory).await?;
     let (writer, reader) = tokio::io::duplex(1024);
     let request = save_upload_request(
         "cancelled.zip",
@@ -556,7 +563,8 @@ fn manager_preferences_persist_validate_and_detect_conflicts() -> TestResult {
 async fn configuration_routes_use_json_and_revision_conflicts() -> TestResult {
     let dir = tempfile::tempdir()?;
     let app = App::new(dir.path().join("data"), None).map_err(app_error)?;
-    let router = api::router(app, dir.path());
+    let router =
+        support::authenticated(api::router(app.clone(), dir.path()), &app.directory).await?;
     for endpoint in [
         "/api/settings/raw",
         "/api/manager-settings",

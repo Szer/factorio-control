@@ -137,7 +137,9 @@ async fn sign_in(
 }
 
 #[tokio::test]
-async fn local_mode_is_only_available_without_account_file() -> TestResult {
+async fn first_start_requires_authentication_and_preserves_private_bootstrap_on_restart()
+-> TestResult {
+    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
     let auth = Auth::load(temp.path(), None).map_err(|e| e.message)?;
     auth.validate_bind("127.0.0.1:9400".parse::<SocketAddr>()?)
@@ -148,22 +150,149 @@ async fn local_mode_is_only_available_without_account_file() -> TestResult {
             .await
             .is_err()
     );
+    let file = temp.path().join(auth::BOOTSTRAP_FILE);
+    let credentials = std::fs::read(&file)?;
+    let value: Value = serde_json::from_slice(&credentials)?;
+    assert!(value["username"] == "admin");
+    assert!(
+        value["password"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64)
+    );
+    assert_eq!(
+        std::fs::metadata(&file)?.permissions().mode() & 0o777,
+        0o600
+    );
+    let accounts = std::fs::read(temp.path().join("panel-accounts.json"))?;
+    let secret = value["password"]
+        .as_str()
+        .ok_or("Missing bootstrap password")?;
+    assert!(!String::from_utf8_lossy(&accounts).contains(secret));
     let router = app(auth);
     let reply = local(&router, Method::GET, "/api/auth/status", None, None).await?;
-    assert_eq!(reply.body["enabled"], false);
+    assert!(reply.body.get("enabled").is_none());
     assert_eq!(
         local(&router, Method::GET, "/api/status", None, None)
             .await?
             .status,
-        StatusCode::OK
+        StatusCode::UNAUTHORIZED
     );
+    Auth::load(temp.path(), Some("https://panel.example")).map_err(|e| e.message)?;
+    assert!(std::fs::read(file)? == credentials);
+    assert!(std::fs::read(temp.path().join("panel-accounts.json"))? == accounts);
+    let other = tempfile::tempdir()?;
+    Auth::load(other.path(), None).map_err(|e| e.message)?;
+    assert!(std::fs::read(other.path().join(auth::BOOTSTRAP_FILE))? != credentials);
+    Ok(())
+}
+
+#[tokio::test]
+async fn temporary_admin_is_restricted_until_password_change_and_file_removal() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
+    let file = temp.path().join(auth::BOOTSTRAP_FILE);
+    let credentials: Value = serde_json::from_slice(&std::fs::read(&file)?)?;
+    let password = credentials["password"]
+        .as_str()
+        .ok_or("Missing bootstrap password")?;
+    let cookie = sign_in(&router, "admin", password).await?;
+    let status = local(
+        &router,
+        Method::GET,
+        "/api/auth/status",
+        Some(&cookie),
+        None,
+    )
+    .await?;
+    assert_eq!(status.body["user"]["must_change_password"], true);
+    for (method, path, body) in [
+        (Method::GET, "/api/status", None),
+        (Method::GET, "/api/settings", None),
+        (Method::GET, "/api/auth/accounts", None),
+        (Method::POST, "/api/server/start", Some(json!({}))),
+        (Method::POST, "/api/auth/accounts/create", Some(json!({}))),
+    ] {
+        assert_eq!(
+            local(&router, method, path, Some(&cookie), body)
+                .await?
+                .status,
+            StatusCode::FORBIDDEN
+        );
+    }
+    for (current, replacement) in [
+        (password, password),
+        (password, "short"),
+        ("incorrect", PASSWORD),
+    ] {
+        let reply = local(
+            &router,
+            Method::POST,
+            "/api/auth/password",
+            Some(&cookie),
+            Some(json!({"current_password":current,"password":replacement})),
+        )
+        .await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert!(file.is_file());
+    }
+    let changed = local(
+        &router,
+        Method::POST,
+        "/api/auth/password",
+        Some(&cookie),
+        Some(json!({"current_password":password,"password":PASSWORD})),
+    )
+    .await?;
+    assert_eq!(changed.status, StatusCode::NO_CONTENT);
+    assert!(!file.exists());
     assert_eq!(
-        local(&router, Method::GET, "/api/auth/accounts", None, None)
+        local(&router, Method::GET, "/api/status", Some(&cookie), None)
             .await?
             .status,
         StatusCode::UNAUTHORIZED
     );
-    assert!(Auth::load(temp.path(), Some("https://panel.example")).is_err());
+    assert_eq!(
+        local(
+            &router,
+            Method::POST,
+            "/api/auth/login",
+            None,
+            Some(json!({"username":"admin","password":password}))
+        )
+        .await?
+        .status,
+        StatusCode::UNAUTHORIZED
+    );
+    let cookie = sign_in(&router, "admin", PASSWORD).await?;
+    assert_eq!(
+        local(&router, Method::GET, "/api/status", Some(&cookie), None)
+            .await?
+            .status,
+        StatusCode::OK
+    );
+    Auth::load(temp.path(), None).map_err(|e| e.message)?;
+    assert!(!file.exists());
+    std::fs::remove_file(temp.path().join("panel-accounts.json"))?;
+    assert!(Auth::load(temp.path(), None).is_err());
+    assert!(!file.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn bootstrap_recovers_interruption_and_cleans_stale_credentials() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    Auth::load(temp.path(), None).map_err(|e| e.message)?;
+    let credentials = std::fs::read(temp.path().join(auth::BOOTSTRAP_FILE))?;
+    std::fs::remove_file(temp.path().join("panel-accounts.json"))?;
+    Auth::load(temp.path(), None).map_err(|e| e.message)?;
+    assert!(std::fs::read(temp.path().join(auth::BOOTSTRAP_FILE))? == credentials);
+    let accounts_path = temp.path().join("panel-accounts.json");
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&accounts_path)?)?;
+    document["accounts"][0]["must_change_password"] = json!(false);
+    factorio_control::storage::atomic_write(&accounts_path, &serde_json::to_vec(&document)?, true)
+        .map_err(|e| e.message)?;
+    Auth::load(temp.path(), None).map_err(|e| e.message)?;
+    assert!(!temp.path().join(auth::BOOTSTRAP_FILE).exists());
     Ok(())
 }
 
@@ -174,7 +303,7 @@ async fn password_hashes_are_private_and_bootstrap_cannot_overwrite() -> TestRes
     let bytes = std::fs::read(temp.path().join("panel-accounts.json"))?;
     let text = String::from_utf8(bytes.clone())?;
     assert!(!text.contains(PASSWORD));
-    assert!(text.contains("$argon2id$"));
+    assert!(text.contains("$argon2id$v=19$m=19456,t=2,p=1$"));
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
         std::fs::metadata(temp.path().join("panel-accounts.json"))?
@@ -455,7 +584,15 @@ async fn account_revision_role_changes_and_deletion_revoke_sessions() -> TestRes
     )
     .await?
     .body;
-    assert!(!document.to_string().contains("password"));
+    assert!(!document.to_string().contains(PASSWORD));
+    assert!(
+        document["accounts"]
+            .as_array()
+            .is_some_and(|accounts| accounts
+                .iter()
+                .all(|account| account.get("password").is_none()
+                    && account.get("password_hash").is_none()))
+    );
     let create = local(&router, Method::POST, "/api/auth/accounts/create", Some(&owner), Some(json!({"revision":document["revision"],"username":"reader","password":PASSWORD,"role":"viewer"}))).await?;
     assert_eq!(create.status, StatusCode::OK);
     let reader = sign_in(&router, "reader", PASSWORD).await?;
@@ -603,7 +740,7 @@ async fn password_changes_revoke_all_sessions_and_require_current_password() -> 
 }
 
 #[tokio::test]
-async fn deleting_accounts_file_fails_closed_and_does_not_restore_local_mode() -> TestResult {
+async fn deleting_accounts_file_disables_access() -> TestResult {
     let temp = tempfile::tempdir()?;
     let router = app(configured(temp.path(), None).map_err(|e| e.message)?);
     let cookie = sign_in(&router, "owner", PASSWORD).await?;
@@ -626,13 +763,14 @@ async fn deleting_accounts_file_fails_closed_and_does_not_restore_local_mode() -
 #[tokio::test]
 async fn json_save_creation_is_not_mistaken_for_zip_upload() -> TestResult {
     let temp = tempfile::tempdir()?;
-    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
+    let router = app(configured(temp.path(), None).map_err(|e| e.message)?);
+    let cookie = sign_in(&router, "owner", PASSWORD).await?;
     assert_eq!(
         local(
             &router,
             Method::POST,
             "/api/saves/create",
-            None,
+            Some(&cookie),
             Some(json!({"name":"test"}))
         )
         .await?
@@ -651,5 +789,27 @@ async fn json_save_creation_is_not_mistaken_for_zip_upload() -> TestResult {
         .status,
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
+    Ok(())
+}
+
+#[test]
+fn bootstrap_refuses_linked_or_public_credential_files() -> TestResult {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let temp = tempfile::tempdir()?;
+    let outside = temp.path().join("outside");
+    let data = temp.path().join("data");
+    std::fs::create_dir(&data)?;
+    std::fs::write(&outside, b"unchanged")?;
+    let path = data.join(auth::BOOTSTRAP_FILE);
+    symlink(&outside, &path)?;
+    assert!(Auth::load(&data, None).is_err());
+    assert!(std::fs::read(&outside)? == b"unchanged");
+    assert!(!data.join("panel-accounts.json").exists());
+    std::fs::remove_file(&path)?;
+    let credentials = json!({"username":"admin","password":"a".repeat(64)});
+    std::fs::write(&path, serde_json::to_vec(&credentials)?)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+    assert!(Auth::load(&data, None).is_err());
+    assert!(!data.join("panel-accounts.json").exists());
     Ok(())
 }

@@ -78,20 +78,21 @@ The game log tab reads a bounded, redacted tail of `factorio-current.log`. Live 
 
 ## Panel access
 
-With no accounts configured, the panel accepts only loopback access. Bootstrap the first administrator before configuring a public origin. The password is read from standard input, never from a command-line argument:
+Authentication is required on every installation, including loopback. On first start, the manager creates `admin` with a unique 256-bit random temporary password. Read it from the running container:
 
 ```sh
-read -r -s -p 'New panel password: ' FC_BOOTSTRAP_PASSWORD
-printf '%s\n' "$FC_BOOTSTRAP_PASSWORD" | docker compose exec -T control /app/factorio-control --create-admin admin
-unset FC_BOOTSTRAP_PASSWORD
-docker compose restart control
+docker compose exec control cat /data/bootstrap-admin.json
 ```
 
-Use at least 12 characters. Panel accounts are separate from Factorio.com credentials and game administrators. Administrators manage accounts and server configuration; operators manage game operations, saves, and mods; viewers have read-only access. Password and role changes revoke the affected sessions. The final administrator cannot be removed or demoted.
+The file lives in the persistent data volume, has mode `0600`, and is never printed in logs or served through the API. With a custom `FC_DATA_DIR`, it is stored in that directory instead. Sign in, then change the temporary password to unlock the panel. Only password change and sign-out are available until this is complete. A successful password change deletes the file and revokes every session for that account. Startup retries cleanup after an interrupted change. Restarts preserve existing accounts and never reset their passwords; a missing account file after setup disables startup.
 
-For a reverse proxy, add `FC_PUBLIC_URL` to the service's `environment` with the exact HTTPS origin (for example `https://factorio.example.com`) and preserve its Host header. Provision accounts before setting this value. Bind to loopback when the proxy runs on the same host; a nonloopback `FC_BIND` additionally requires configured authentication. TLS terminates at the proxy; forwarded headers do not expand trusted origins. Session cookies are HttpOnly, SameSite=Strict, and Secure with a public origin. Sessions expire and must be re-established after manager restarts.
+Passwords use Argon2id v19 with 19 MiB memory, two iterations, one lane, a unique 16-byte random salt and a 32-byte output, matching the OWASP Password Storage Cheat Sheet minimum. Only salted PHC hashes are stored in `panel-accounts.json`. Password verification runs in a bounded worker pool and login attempts are rate-limited.
 
-Keep `panel-accounts.json` and the data directory private. Back them up before moving installations. Real credentials are supplied by the owner; the application does not generate an initial shared password.
+Use at least 12 characters for your replacement password. Panel accounts are separate from Factorio.com credentials and game administrators. Administrators manage accounts and server configuration; operators manage game operations, saves, and mods; viewers have read-only access. Password and role changes revoke the affected sessions. The final administrator cannot be removed or demoted.
+
+For a reverse proxy, add `FC_PUBLIC_URL` to the service's `environment` with the exact HTTPS origin (for example `https://factorio.example.com`) and preserve its Host header. Bind to loopback when the proxy runs on the same host; a nonloopback `FC_BIND` requires an explicit HTTPS public origin. TLS terminates at the proxy; forwarded headers do not expand trusted origins. Session cookies are HttpOnly, SameSite=Strict, and Secure with a public origin. Sessions expire and must be re-established after manager restarts.
+
+Keep `panel-accounts.json` and the data directory private. Back them up before moving installations. Choose your permanent password during first sign-in. Do not share or retain the bootstrap credential file.
 
 ## Current boundaries
 

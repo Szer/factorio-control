@@ -1,3 +1,4 @@
+import { TestAccess } from "./access";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cleanup,
@@ -65,13 +66,14 @@ function mount(element: ReactElement) {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={client}>{element}</QueryClientProvider>,
+    <QueryClientProvider client={client}>
+      <TestAccess>{element}</TestAccess>
+    </QueryClientProvider>,
   );
 }
 beforeEach(() => {
   vi.spyOn(authApi, "status").mockResolvedValue({
-    enabled: false,
-    user: null,
+    user: { username: "owner", role: "admin", must_change_password: false },
     expires_at: null,
   });
   Object.defineProperty(HTMLDialogElement.prototype, "showModal", {

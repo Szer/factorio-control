@@ -1,3 +1,4 @@
+import { TestAccess } from "./access";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   cleanup,
@@ -45,7 +46,9 @@ function mount(state: Status = status) {
   });
   return render(
     <QueryClientProvider client={client}>
-      <Mods status={state} />
+      <TestAccess>
+        <Mods status={state} />
+      </TestAccess>
     </QueryClientProvider>,
   );
 }

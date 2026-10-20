@@ -5,6 +5,7 @@ import {
   AuthContext,
   authApi,
   authEvent,
+  authExpired,
   authKey,
   roleSchema,
   useAccess,
@@ -108,9 +109,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     refetchInterval: 60_000,
   });
   const identity = session.data
-    ? session.data.enabled
-      ? `${session.data.user?.username ?? "signed-out"}:${session.data.user?.role ?? "none"}`
-      : "local"
+    ? `${session.data.user?.username ?? "signed-out"}:${session.data.user?.role ?? "none"}:${String(session.data.user?.must_change_password ?? false)}`
     : null;
   const [readyIdentity, setReadyIdentity] = useState<string | null>(null);
   useEffect(() => {
@@ -129,7 +128,6 @@ export function AuthGate({ children }: { children: ReactNode }) {
       .catch(() => {
         if (mounted)
           client.setQueryData<SessionStatus>(authKey, {
-            enabled: true,
             user: null,
             expires_at: null,
           });
@@ -150,7 +148,6 @@ export function AuthGate({ children }: { children: ReactNode }) {
           });
           client.getMutationCache().clear();
           client.setQueryData<SessionStatus>(authKey, {
-            enabled: true,
             user: null,
             expires_at: null,
           });
@@ -158,7 +155,6 @@ export function AuthGate({ children }: { children: ReactNode }) {
         .catch(() => {
           if (mounted)
             client.setQueryData<SessionStatus>(authKey, {
-              enabled: true,
               user: null,
               expires_at: null,
             });
@@ -192,7 +188,35 @@ export function AuthGate({ children }: { children: ReactNode }) {
         </section>
       </main>
     );
-  if (session.data.enabled && !session.data.user) return <Login />;
+  if (!session.data.user) return <Login />;
+  if (session.data.user.must_change_password)
+    return (
+      <main className="auth-login">
+        <section className="panel">
+          <header className="panel-header">
+            <h1>Change temporary password</h1>
+          </header>
+          <p className="auth-form">
+            Set your own password to unlock the panel. The bootstrap credential
+            file will be deleted.
+          </p>
+          <PasswordForm
+            changed={() => {
+              authExpired();
+              return Promise.resolve();
+            }}
+          />
+          <button
+            className="button"
+            onClick={() => {
+              authApi.logout().then(authExpired).catch(authExpired);
+            }}
+          >
+            Sign out
+          </button>
+        </section>
+      </main>
+    );
   if (readyIdentity !== identity)
     return (
       <main className="auth-login" role="status">
@@ -273,7 +297,7 @@ function PasswordForm({ changed }: { changed: () => Promise<void> }) {
 }
 
 export function SessionMenu() {
-  const { enabled, user } = useAccess();
+  const { user } = useAccess();
   const client = useQueryClient();
   const reset = async () => {
     await client.cancelQueries();
@@ -282,13 +306,12 @@ export function SessionMenu() {
     });
     client.getMutationCache().clear();
     client.setQueryData<SessionStatus>(authKey, {
-      enabled: true,
       user: null,
       expires_at: null,
     });
   };
   const logout = useMutation({ mutationFn: authApi.logout, onSuccess: reset });
-  if (!enabled || !user) return null;
+  if (!user) return null;
   return (
     <details className="auth-menu">
       <summary>
@@ -442,7 +465,7 @@ function AccountEditor({
 }
 
 export function AccountPanel() {
-  const { enabled, canAdmin } = useAccess();
+  const { canAdmin } = useAccess();
   const client = useQueryClient();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -451,7 +474,7 @@ export function AccountPanel() {
   const query = useQuery({
     queryKey: ["accounts"],
     queryFn: authApi.accounts,
-    enabled: enabled && canAdmin,
+    enabled: canAdmin,
     retry: false,
   });
   const create = useMutation({
@@ -472,16 +495,6 @@ export function AccountPanel() {
     },
   });
   if (!canAdmin) return null;
-  if (!enabled)
-    return (
-      <section className="panel auth-form">
-        <h2>Panel accounts</h2>
-        <p>
-          Bootstrap the first administrator from the command line to enable
-          sign-in.
-        </p>
-      </section>
-    );
   return (
     <section className="panel auth-account-panel">
       <header className="panel-header">

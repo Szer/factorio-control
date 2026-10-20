@@ -1,3 +1,4 @@
+import { TestAccess } from "./access";
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -86,7 +87,9 @@ function mount(active = true) {
   });
   render(
     <QueryClientProvider client={client}>
-      <Mods status={status} active={active} />
+      <TestAccess>
+        <Mods status={status} active={active} />
+      </TestAccess>
     </QueryClientProvider>,
   );
   return checks;

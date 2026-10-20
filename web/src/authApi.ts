@@ -1,18 +1,19 @@
 import { createContext, useContext } from "react";
 import { z } from "zod";
+import type { components } from "./api.generated";
 
 export const roleSchema = z.enum(["admin", "operator", "viewer"]);
 export type Role = z.infer<typeof roleSchema>;
 export const accountSchema = z.object({
   username: z.string(),
   role: roleSchema,
-});
+  must_change_password: z.boolean(),
+}) satisfies z.ZodType<components["schemas"]["Account"]>;
 export type Account = z.infer<typeof accountSchema>;
 export const sessionSchema = z.object({
-  enabled: z.boolean(),
   user: accountSchema.nullable(),
   expires_at: z.number().nullable(),
-});
+}) satisfies z.ZodType<components["schemas"]["SessionStatus"]>;
 export type SessionStatus = z.infer<typeof sessionSchema>;
 export const accountsSchema = z.object({
   revision: z.string(),
@@ -22,14 +23,15 @@ export type AccountsDocument = z.infer<typeof accountsSchema>;
 export const authKey = ["auth"] as const;
 export const authEvent = "fc-auth-expired";
 export const AuthContext = createContext<SessionStatus>({
-  enabled: false,
   user: null,
   expires_at: null,
 });
 
 export function useAccess() {
   const session = useContext(AuthContext);
-  const role = session.enabled ? session.user?.role : "admin";
+  const role = session.user?.must_change_password
+    ? undefined
+    : session.user?.role;
   return {
     ...session,
     role,

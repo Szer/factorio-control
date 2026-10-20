@@ -14,13 +14,11 @@ import {
 import type { SessionStatus } from "../src/authApi";
 
 const signedOut: SessionStatus = {
-  enabled: true,
   user: null,
   expires_at: null,
 };
 const administrator: SessionStatus = {
-  enabled: true,
-  user: { username: "owner", role: "admin" },
+  user: { username: "owner", role: "admin", must_change_password: false },
   expires_at: 9999999999,
 };
 function client() {
@@ -134,7 +132,7 @@ it("remounts the app and clears privileged caches when the session role changes"
   queryClient.setQueryData(["settings"], { token: "synthetic-test-value" });
   status.mockResolvedValue({
     ...administrator,
-    user: { username: "owner", role: "viewer" },
+    user: { username: "owner", role: "viewer", must_change_password: false },
   });
   await act(async () => {
     await queryClient.refetchQueries({ queryKey: authKey });
@@ -184,7 +182,11 @@ it("does not fetch accounts for viewers or local unauthenticated mode", () => {
       <AuthContext.Provider
         value={{
           ...administrator,
-          user: { username: "reader", role: "viewer" },
+          user: {
+            username: "reader",
+            role: "viewer",
+            must_change_password: false,
+          },
         }}
       >
         <AccountPanel />
@@ -198,13 +200,15 @@ it("does not fetch accounts for viewers or local unauthenticated mode", () => {
 it("creates an account using the current revision and explicit role", async () => {
   vi.spyOn(authApi, "accounts").mockResolvedValue({
     revision: "fixture-revision",
-    accounts: [{ username: "owner", role: "admin" }],
+    accounts: [
+      { username: "owner", role: "admin", must_change_password: false },
+    ],
   });
   const create = vi.spyOn(authApi, "create").mockResolvedValue({
     revision: "fixture-next",
     accounts: [
-      { username: "owner", role: "admin" },
-      { username: "reader", role: "viewer" },
+      { username: "owner", role: "admin", must_change_password: false },
+      { username: "reader", role: "viewer", must_change_password: false },
     ],
   });
   render(
@@ -233,7 +237,9 @@ it("creates an account using the current revision and explicit role", async () =
 it("does not offer self deletion while editing the current account", async () => {
   vi.spyOn(authApi, "accounts").mockResolvedValue({
     revision: "fixture-revision",
-    accounts: [{ username: "owner", role: "admin" }],
+    accounts: [
+      { username: "owner", role: "admin", must_change_password: false },
+    ],
   });
   render(
     <QueryClientProvider client={client()}>
@@ -247,4 +253,45 @@ it("does not offer self deletion while editing the current account", async () =>
     .click(await screen.findByRole("button", { name: "Edit" }));
   expect(await screen.findByText("Edit owner")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Delete account" })).toBeNull();
+});
+
+it("requires a temporary password change without mounting protected pages", async () => {
+  vi.spyOn(authApi, "status").mockResolvedValue({
+    ...administrator,
+    user: { username: "admin", role: "admin", must_change_password: true },
+  });
+  const change = vi.spyOn(authApi, "password").mockResolvedValue(undefined);
+  const queryClient = mountGate();
+  const user = userEvent.setup();
+  expect(
+    await screen.findByRole("heading", { name: "Change temporary password" }),
+  ).toBeTruthy();
+  expect(screen.queryByText(/Protected/)).toBeNull();
+  await user.type(
+    screen.getByLabelText("Current password"),
+    "synthetic-temporary-password",
+  );
+  await user.type(
+    screen.getByLabelText("New password"),
+    "synthetic-permanent-password",
+  );
+  await user.click(screen.getByRole("button", { name: "Change password" }));
+  expect(change).toHaveBeenCalledWith(
+    "synthetic-temporary-password",
+    "synthetic-permanent-password",
+  );
+  expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
+  expect(queryClient.getQueryData(authKey)).toEqual(signedOut);
+  expect(screen.queryByDisplayValue("synthetic-temporary-password")).toBeNull();
+  expect(screen.queryByText(/Protected/)).toBeNull();
+});
+
+it("grants no permissions without an authenticated context", () => {
+  render(
+    <QueryClientProvider client={client()}>
+      <Protected />
+    </QueryClientProvider>,
+  );
+  expect(screen.getByText("Cannot administer")).toBeTruthy();
+  expect(screen.getByText("Cannot operate")).toBeTruthy();
 });

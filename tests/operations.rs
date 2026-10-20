@@ -12,6 +12,8 @@ use std::{
     time::Duration,
 };
 use tower::ServiceExt;
+mod support;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 fn failure(error: factorio_control::Error) -> std::io::Error {
     std::io::Error::other(error.message)
@@ -33,7 +35,8 @@ async fn post(
     path: &str,
     body: serde_json::Value,
 ) -> Result<(StatusCode, serde_json::Value), Box<dyn std::error::Error>> {
-    let response = api::router(app.clone(), &app.directory)
+    let response = support::authenticated(api::router(app.clone(), &app.directory), &app.directory)
+        .await?
         .oneshot(
             Request::builder()
                 .method("POST")

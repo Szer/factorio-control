@@ -11,6 +11,10 @@ pub mod save_metadata;
 pub mod storage;
 pub mod telemetry;
 
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
+
 use axum::{
     Json,
     http::StatusCode,

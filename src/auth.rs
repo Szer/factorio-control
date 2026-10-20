@@ -1,5 +1,8 @@
 use crate::{Error, Result, storage};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use argon2::{
+    Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
+    password_hash::SaltString,
+};
 use axum::{
     Json, Router,
     body::Body,
@@ -27,6 +30,8 @@ const SESSION_SECONDS: u64 = 8 * 60 * 60;
 const MAX_ACCOUNTS: usize = 100;
 const MAX_SESSIONS: usize = 1000;
 const MAX_RATE_KEYS: usize = 1024;
+pub const BOOTSTRAP_FILE: &str = "bootstrap-admin.json";
+const INITIALIZED_FILE: &str = ".panel-auth-initialized";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -40,11 +45,11 @@ pub enum Role {
 pub struct Account {
     pub username: String,
     pub role: Role,
+    pub must_change_password: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct SessionStatus {
-    pub enabled: bool,
     pub user: Option<Account>,
     pub expires_at: Option<u64>,
 }
@@ -90,6 +95,14 @@ struct StoredAccount {
     username: String,
     role: Role,
     password_hash: String,
+    #[serde(default)]
+    must_change_password: bool,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapCredentials {
+    username: String,
+    password: String,
 }
 #[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -139,6 +152,7 @@ fn public_account(account: &StoredAccount) -> Account {
     Account {
         username: account.username.clone(),
         role: account.role,
+        must_change_password: account.must_change_password,
     }
 }
 
@@ -175,15 +189,20 @@ fn hash_password(password: &str) -> Result<String> {
             "Unable to protect password",
         )
     })?;
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|hash| hash.to_string())
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to protect password",
-            )
-        })
+    Argon2::new(
+        Algorithm::Argon2id,
+        Version::V0x13,
+        Params::new(19456, 2, 1, Some(32))
+            .map_err(|_| Error::bad("Invalid password hashing policy"))?,
+    )
+    .hash_password(password.as_bytes(), &salt)
+    .map(|hash| hash.to_string())
+    .map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to protect password",
+        )
+    })
 }
 fn verify_password(password: &str, stored: &str) -> bool {
     PasswordHash::new(stored).is_ok_and(|hash| {
@@ -233,6 +252,93 @@ fn read_accounts(path: &Path) -> Result<(String, Vec<StoredAccount>)> {
     Ok((revision, accounts))
 }
 
+fn mark_initialized(directory: &Path) -> Result<()> {
+    let marker = directory.join(INITIALIZED_FILE);
+    if storage::read_document(&marker)?.1.is_none() {
+        storage::atomic_write(&marker, b"Panel authentication is required.\n", false)?;
+    }
+    Ok(())
+}
+
+fn remove_bootstrap_file(directory: &Path, accounts: &[StoredAccount]) -> Result<()> {
+    if accounts.iter().any(|account| account.must_change_password) {
+        return Ok(());
+    }
+    let path = directory.join(BOOTSTRAP_FILE);
+    storage::ensure_regular(&path)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => std::fs::File::open(directory)?.sync_all()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn initialize_accounts(directory: &Path) -> Result<()> {
+    let path = directory.join("panel-accounts.json");
+    if read_accounts(&path)?.0 != "missing" {
+        mark_initialized(directory)?;
+        return Ok(());
+    }
+    let credentials_path = directory.join(BOOTSTRAP_FILE);
+    let existing = storage::read_document(&credentials_path)?.1;
+    if existing.is_none()
+        && storage::read_document(&directory.join(INITIALIZED_FILE))?
+            .1
+            .is_some()
+    {
+        return Err(Error::bad(
+            "Panel account file is missing; restore it from backup",
+        ));
+    }
+    let credentials = if let Some(bytes) = existing {
+        let credentials: BootstrapCredentials = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::bad("Invalid bootstrap credential file"))?;
+        use std::os::unix::fs::PermissionsExt;
+        if credentials.username != "admin"
+            || credentials.password.len() != 64
+            || !credentials
+                .password
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || std::fs::metadata(&credentials_path)?.permissions().mode() & 0o077 != 0
+        {
+            return Err(Error::bad("Invalid or insecure bootstrap credential file"));
+        }
+        credentials
+    } else {
+        let mut bytes = [0u8; 32];
+        OsRng
+            .try_fill_bytes(&mut bytes)
+            .map_err(|_| Error::bad("Secure randomness is unavailable"))?;
+        let credentials = BootstrapCredentials {
+            username: "admin".into(),
+            password: hex(&bytes),
+        };
+        storage::atomic_write(
+            &credentials_path,
+            &serde_json::to_vec_pretty(&credentials)?,
+            false,
+        )?;
+        credentials
+    };
+    mark_initialized(directory)?;
+    let accounts = StoredAccounts {
+        accounts: vec![StoredAccount {
+            username: credentials.username,
+            role: Role::Admin,
+            password_hash: hash_password(&credentials.password)?,
+            must_change_password: true,
+        }],
+    };
+    storage::atomic_write(&path, &serde_json::to_vec_pretty(&accounts)?, false)?;
+    eprintln!(
+        "Temporary administrator created. Read {} and change its password at first sign-in.",
+        credentials_path.display()
+    );
+    Ok(())
+}
+
 impl Auth {
     pub fn load(directory: &Path, public_url: Option<&str>) -> Result<Self> {
         storage::ensure_directory(directory)?;
@@ -243,13 +349,10 @@ impl Auth {
             }
             Ok(url)
         }).transpose()?;
+        initialize_accounts(directory)?;
         let path = directory.join("panel-accounts.json");
         let (revision, accounts) = read_accounts(&path)?;
-        if public_origin.is_some() && accounts.is_empty() {
-            return Err(Error::bad(
-                "Bootstrap an administrator before configuring FC_PUBLIC_URL",
-            ));
-        }
+        remove_bootstrap_file(directory, &accounts)?;
         let mut secret = [0u8; 32];
         OsRng.try_fill_bytes(&mut secret).map_err(|_| {
             error(
@@ -297,6 +400,9 @@ impl Auth {
             runtime.revision = revision;
             runtime.accounts = accounts;
             runtime.sessions.clear();
+        }
+        if let Some(directory) = self.path.parent() {
+            remove_bootstrap_file(directory, &runtime.accounts)?;
         }
         Ok(())
     }
@@ -508,14 +614,23 @@ pub async fn guard(State(auth): State<Auth>, mut request: Request<Body>, next: N
         if request.uri().path().starts_with("/api/") {
             let mut runtime = auth.inner.lock().await;
             auth.refresh(&mut runtime)?;
-            if !runtime.accounts.is_empty()
-                && !matches!(
-                    (request.method(), request.uri().path()),
-                    (&Method::GET, "/api/auth/status") | (&Method::POST, "/api/auth/login")
-                )
-            {
+            if !matches!(
+                (request.method(), request.uri().path()),
+                (&Method::GET, "/api/auth/status") | (&Method::POST, "/api/auth/login")
+            ) {
                 let (account, _) =
                     identify(&mut runtime, request.headers()).ok_or_else(unauthorized)?;
+                if account.must_change_password
+                    && !matches!(
+                        (request.method(), request.uri().path()),
+                        (&Method::POST, "/api/auth/password" | "/api/auth/logout")
+                    )
+                {
+                    return Err(error(
+                        StatusCode::FORBIDDEN,
+                        "Change the temporary password before using the panel",
+                    ));
+                }
                 if !permits(account.role, request.method(), request.uri().path()) {
                     return Err(forbidden());
                 }
@@ -564,7 +679,6 @@ pub async fn status(State(auth): State<Auth>, headers: HeaderMap) -> Result<Json
     auth.refresh(&mut runtime)?;
     let session = identify(&mut runtime, &headers);
     Ok(Json(SessionStatus {
-        enabled: !runtime.accounts.is_empty(),
         user: session.as_ref().map(|(account, _)| account.clone()),
         expires_at: session.map(|(_, expiry)| expiry),
     }))
@@ -607,11 +721,6 @@ pub async fn login(
     let hash = {
         let mut runtime = auth.inner.lock().await;
         auth.refresh(&mut runtime)?;
-        if runtime.accounts.is_empty() {
-            return Err(Error::bad(
-                "Panel authentication is not configured; bootstrap an administrator from the command line",
-            ));
-        }
         rate_limit(&mut runtime, "global", 60, Duration::from_secs(60))?;
         rate_limit(
             &mut runtime,
@@ -678,7 +787,6 @@ pub async fn login(
         .attempts
         .remove(&format!("account:{}", account.username));
     let mut response = Json(SessionStatus {
-        enabled: true,
         user: Some(account),
         expires_at: Some(expires_at),
     })
@@ -704,7 +812,7 @@ pub async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Result<Resp
 
 fn require_admin(runtime: &mut Runtime, headers: &HeaderMap) -> Result<Account> {
     let (account, _) = identify(runtime, headers).ok_or_else(unauthorized)?;
-    if account.role != Role::Admin {
+    if account.role != Role::Admin || account.must_change_password {
         return Err(forbidden());
     }
     Ok(account)
@@ -786,6 +894,7 @@ pub async fn create_account(
         username: input.username,
         role: input.role,
         password_hash,
+        must_change_password: false,
     });
     Ok(Json(auth.write_accounts(&mut runtime, accounts)?))
 }
@@ -818,6 +927,7 @@ pub async fn update_account(
     account.role = input.role;
     if let Some(password_hash) = password_hash {
         account.password_hash = password_hash;
+        account.must_change_password = false;
     }
     if !accounts.iter().any(|account| account.role == Role::Admin) {
         return Err(Error::conflict("At least one administrator must remain"));
@@ -826,6 +936,12 @@ pub async fn update_account(
     runtime
         .sessions
         .retain(|_, session| session.username != input.username);
+    remove_bootstrap_file(
+        auth.path
+            .parent()
+            .ok_or_else(|| Error::bad("Missing account directory"))?,
+        &runtime.accounts,
+    )?;
     Ok(Json(response))
 }
 
@@ -854,6 +970,12 @@ pub async fn delete_account(
     runtime
         .sessions
         .retain(|_, session| session.username != input.username);
+    remove_bootstrap_file(
+        auth.path
+            .parent()
+            .ok_or_else(|| Error::bad("Missing account directory"))?,
+        &runtime.accounts,
+    )?;
     Ok(Json(response))
 }
 
@@ -887,6 +1009,9 @@ pub async fn change_password(
     if input.current_password.len() > 1024 {
         return Err(Error::bad("Current password is invalid"));
     }
+    if input.current_password == input.password {
+        return Err(Error::bad("Choose a different password"));
+    }
     let verified_hash = hash.clone();
     let verified = password_job(&auth, move || {
         verify_password(&input.current_password, &verified_hash)
@@ -906,10 +1031,17 @@ pub async fn change_password(
         .find(|account| account.username == username && account.password_hash == hash)
         .ok_or_else(unauthorized)?;
     account.password_hash = password_hash;
+    account.must_change_password = false;
     auth.write_accounts(&mut runtime, accounts)?;
     runtime
         .sessions
         .retain(|_, session| session.username != username);
+    remove_bootstrap_file(
+        auth.path
+            .parent()
+            .ok_or_else(|| Error::bad("Missing account directory"))?,
+        &runtime.accounts,
+    )?;
     let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
@@ -932,9 +1064,11 @@ pub fn bootstrap_admin(directory: &Path, username: &str, password: &str) -> Resu
             username: username.into(),
             role: Role::Admin,
             password_hash: hash_password(password)?,
+            must_change_password: false,
         }],
     };
-    storage::atomic_write(&path, &serde_json::to_vec_pretty(&accounts)?, false)
+    storage::atomic_write(&path, &serde_json::to_vec_pretty(&accounts)?, false)?;
+    mark_initialized(directory)
 }
 
 #[derive(utoipa::OpenApi)]
@@ -1004,6 +1138,7 @@ mod tests {
                 username: "owner".into(),
                 role: Role::Admin,
                 password_hash: String::new(),
+                must_change_password: false,
             }],
             sessions: HashMap::from([(
                 token_key(&token),

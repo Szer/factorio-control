@@ -665,18 +665,22 @@ mod tests {
                 .any(|item| item.name == "demo" && matches!(item.action, SyncAction::Switch))
         );
         assert_eq!(plan.disable, vec!["extra"]);
-        let response = crate::api::router(app.clone(), &_temp.path().join("static"))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/saves/world.zip/mods/sync")
-                    .header("host", "localhost:9400")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(
-                        &serde_json::json!({"revision":plan.revision}),
-                    )?))?,
-            )
-            .await?;
+        let response = crate::test_support::authenticated(
+            crate::api::router(app.clone(), &_temp.path().join("static")),
+            &app.directory,
+        )
+        .await?
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/saves/world.zip/mods/sync")
+                .header("host", "localhost:9400")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(
+                    &serde_json::json!({"revision":plan.revision}),
+                )?))?,
+        )
+        .await?;
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await?;
         assert_eq!(
@@ -825,14 +829,18 @@ mod tests {
         .await
         .map_err(err)?;
         assert!(result.0.mods.is_empty());
-        let response = crate::api::router(app.clone(), &temp.path().join("static"))
-            .oneshot(
-                Request::builder()
-                    .uri("/api/saves/world.zip/mods/sync")
-                    .header("host", "localhost:9400")
-                    .body(Body::empty())?,
-            )
-            .await?;
+        let response = crate::test_support::authenticated(
+            crate::api::router(app.clone(), &temp.path().join("static")),
+            &app.directory,
+        )
+        .await?
+        .oneshot(
+            Request::builder()
+                .uri("/api/saves/world.zip/mods/sync")
+                .header("host", "localhost:9400")
+                .body(Body::empty())?,
+        )
+        .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let state: Option<SyncProgress> =
             serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;

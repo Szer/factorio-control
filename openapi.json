@@ -2261,9 +2261,13 @@
         "type": "object",
         "required": [
           "username",
-          "role"
+          "role",
+          "must_change_password"
         ],
         "properties": {
+          "must_change_password": {
+            "type": "boolean"
+          },
           "role": {
             "$ref": "#/components/schemas/Role"
           },
@@ -3479,13 +3483,7 @@
       },
       "SessionStatus": {
         "type": "object",
-        "required": [
-          "enabled"
-        ],
         "properties": {
-          "enabled": {
-            "type": "boolean"
-          },
           "expires_at": {
             "type": [
               "integer",

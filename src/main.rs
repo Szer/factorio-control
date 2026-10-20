@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::io::stdin().take(1026).read_to_string(&mut password)?;
         let password = password.trim_end_matches(['\r', '\n']);
         auth::bootstrap_admin(&app.directory, username, password).map_err(|error| error.message)?;
-        eprintln!("Administrator created. Restart the manager to enable authentication.");
+        eprintln!("Administrator created. Restart the manager to sign in.");
         return Ok(());
     }
     let public_url = std::env::var("FC_PUBLIC_URL").ok();
