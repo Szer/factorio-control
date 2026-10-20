@@ -85,6 +85,7 @@ pub struct App {
     pub directory: PathBuf,
     pub binary: Option<PathBuf>,
     pub save_operations: Arc<Mutex<()>>,
+    pub mod_operations: Arc<Mutex<()>>,
 }
 pub struct Inner {
     pub status: Status,
@@ -104,10 +105,11 @@ impl App {
         std::fs::create_dir_all(&saves)?;
         storage::ensure_directory(&saves)?;
         let binary_available = binary.as_ref().is_some_and(|p| p.is_file());
-        Ok(Self {
+        let app = Self {
             directory,
             binary,
             save_operations: Arc::new(Mutex::new(())),
+            mod_operations: Arc::new(Mutex::new(())),
             sync_progress: Arc::new(std::sync::Mutex::new(None)),
             inner: Arc::new(Mutex::new(Inner {
                 status: Status {
@@ -126,7 +128,26 @@ impl App {
                 generation: 0,
                 telemetry: telemetry::Runtime::default(),
             })),
+        };
+        mods::workflows::ensure_consistent(&app)?;
+        mods::workflows::cleanup_staging(&app)?;
+        Ok(app)
+    }
+    pub async fn mod_storage<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(App) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let guard = self.mod_operations.clone().lock_owned().await;
+        let app = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            work(app)
         })
+        .await
+        .map_err(|_| Error {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "Mod storage task failed".into(),
+        })?
     }
     pub fn settings_path(&self) -> PathBuf {
         self.directory.join("server-settings.json")

@@ -30,8 +30,11 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - run: python3 scripts/test-release.py
       - run: cargo run --locked -- --openapi > openapi.json
       - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npm audit --audit-level=high
         working-directory: web
       - run: npm run api:generate && npm run format:check && npm run check && npm test && npm run build
         working-directory: web
@@ -68,6 +71,14 @@ jobs:
           labels: |
             org.opencontainers.image.licenses=MIT
             io.factorio.version=${{ steps.game.outputs.version }}
+      - name: Test against the bundled Factorio engine
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: engine-tests
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - name: Build test image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:

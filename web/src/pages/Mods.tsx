@@ -1,8 +1,9 @@
+import type { SessionMutationContext } from "../useSessionMutation";
+import { useSessionMutation } from "../useSessionMutation";
 import { Fragment, useRef, useState } from "react";
 import {
   useIsFetching,
   useIsMutating,
-  useMutation,
   useQueries,
   useQuery,
   useQueryClient,
@@ -44,19 +45,19 @@ function ModRow({
 }) {
   const client = useQueryClient();
   const busy = useIsMutating({ mutationKey: ["mod-change"] }) > 0;
-  const enable = useMutation({
+  const enable = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: api.enableMod,
-    onSuccess: (result) => {
-      client.setQueryData(["mods"], result);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["mods"], result);
     },
   });
-  const update = useMutation({
+  const update = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: api.updateMod,
-    onSuccess: async (result) => {
-      client.setQueryData(["mods"], result);
-      await client.invalidateQueries({ queryKey: ["mod-settings"] });
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["mods"], result);
+      await session.refresh([["mod-settings"]]);
     },
   });
   const incompatible = updates.data?.compatible === false;
@@ -298,21 +299,23 @@ function ModWorkflows({
     queryFn: modWorkflowApi.packs,
     enabled: open && tab === "packs",
   });
-  const preview = useMutation({
+  const preview = useSessionMutation({
     mutationFn: () => modWorkflowApi.preview(document.revision),
   });
-  const action = useMutation({
+  const action = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: (run: () => Promise<ModsDocument | undefined>) => run(),
-    onSuccess: async (result) => {
-      if (result) client.setQueryData(["mods"], result);
-      setConfirmation(null);
-      preview.reset();
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ["mods"] }),
-        client.invalidateQueries({ queryKey: ["mod-settings"] }),
-        client.invalidateQueries({ queryKey: ["mod-packs"] }),
-        client.invalidateQueries({ queryKey: ["mod-updates"] }),
+    onSuccess: async (result, _variables, session) => {
+      if (result) await session.publish(["mods"], result);
+      session.commit(() => {
+        setConfirmation(null);
+        preview.reset();
+      });
+      await session.refresh([
+        ["mods"],
+        ["mod-settings"],
+        ["mod-packs"],
+        ["mod-updates"],
       ]);
     },
   });
@@ -569,14 +572,22 @@ function ModWorkflows({
                   className="toolbar"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    action.mutate(async () => {
-                      await modWorkflowApi.createPack(
-                        document.revision,
-                        packName,
-                      );
-                      setPackName("");
-                      return undefined;
-                    });
+                    action.mutate(
+                      async () => {
+                        await modWorkflowApi.createPack(
+                          document.revision,
+                          packName,
+                        );
+                        return undefined;
+                      },
+                      {
+                        onSuccess: (_result, _variables, session) => {
+                          session?.commit(() => {
+                            setPackName("");
+                          });
+                        },
+                      },
+                    );
                   }}
                 >
                   <input
@@ -810,40 +821,41 @@ function StartupEditor({
 }) {
   const [baseline, setBaseline] = useState(initial);
   const [draft, setDraft] = useState(initial.settings);
-  const [seenRevision, setSeenRevision] = useState(initial.revision);
   const fileInput = useRef<HTMLInputElement>(null);
-  const client = useQueryClient();
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline.settings);
   useUnsavedChanges(dirty);
-  function receive(result: ModSettingsDocument) {
-    setBaseline(result);
-    setDraft(result.settings);
-    client.setQueryData(["mod-settings"], result);
-    client.invalidateQueries({ queryKey: ["mods"] }).catch(() => undefined);
+  async function receive(
+    result: ModSettingsDocument,
+    session: SessionMutationContext,
+    after?: () => undefined,
+  ) {
+    await session.publish(["mod-settings"], result, () => {
+      setBaseline(result);
+      setDraft(result.settings);
+      after?.();
+    });
+    await session.refresh([["mods"]]);
   }
-  const save = useMutation({
+  const save = useSessionMutation({
     mutationFn: api.saveModSettings,
-    onSuccess: receive,
+    onSuccess: (result, _variables, session) => receive(result, session),
   });
-  const upload = useMutation({
+  const upload = useSessionMutation({
     mutationFn: api.uploadModSettings,
-    onSuccess: receive,
+    onSuccess: (result, _variables, session) => receive(result, session),
   });
-  const reload = useMutation({
+  const reload = useSessionMutation({
     mutationFn: api.modSettings,
-    onSuccess: (result) => {
-      receive(result);
-      save.reset();
-      upload.reset();
-    },
+    onSuccess: (result, _variables, session) =>
+      receive(result, session, () => {
+        save.reset();
+        upload.reset();
+      }),
   });
   const busy = save.isPending || upload.isPending || reload.isPending;
-  if (initial.revision !== seenRevision) {
-    setSeenRevision(initial.revision);
-    if (!dirty && !busy) {
-      setBaseline(initial);
-      setDraft(initial.settings);
-    }
+  if (initial.revision !== baseline.revision && !dirty && !busy) {
+    setBaseline(initial);
+    setDraft(initial.settings);
   }
   function change(name: string, value: string) {
     setDraft((previous) =>
@@ -1072,7 +1084,8 @@ function StartupEditor({
             className="button secondary"
             disabled={!dirty || busy}
             onClick={() => {
-              setDraft(baseline.settings);
+              setBaseline(initial);
+              setDraft(initial.settings);
               save.reset();
             }}
           >
@@ -1128,14 +1141,12 @@ export default function Mods({
   });
   const checking = useIsFetching({ queryKey: ["mod-updates"] }) > 0;
   const changing = useIsMutating({ mutationKey: ["mod-change"] }) > 0;
-  const upload = useMutation({
+  const upload = useSessionMutation({
     mutationKey: ["mod-change"],
     mutationFn: api.uploadMod,
-    onSuccess: (result) => {
-      client.setQueryData(["mods"], result);
-      client
-        .invalidateQueries({ queryKey: ["mod-settings"] })
-        .catch(() => undefined);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["mods"], result);
+      await session.refresh([["mod-settings"]]);
     },
   });
   const stopped =
@@ -1168,7 +1179,7 @@ export default function Mods({
       )}
       <div hidden={tab !== "mods"}>
         <div className="toolbar">
-          {query.data && (
+          {query.data && active && tab === "mods" && (
             <ModWorkflows document={query.data} stopped={stopped} />
           )}
           <button
@@ -1197,8 +1208,8 @@ export default function Mods({
               const file = event.target.files?.[0];
               setError(null);
               if (file && query.data) {
-                if (file.size > 64 * 1024 * 1024)
-                  setError("Mod ZIP uploads are limited to 64 MB.");
+                if (file.size > 1024 * 1024 * 1024)
+                  setError("Mod ZIP uploads are limited to 1 GiB.");
                 else upload.mutate({ file, revision: query.data.revision });
               }
               event.target.value = "";
@@ -1237,9 +1248,14 @@ export default function Mods({
             Mod installed. Changes apply on the next server start.
           </Notice>
         )}
+        {query.isError && query.data && (
+          <Notice>
+            {errorMessage(query.error)} Showing the last loaded mods.
+          </Notice>
+        )}
         {query.isPending ? (
           <Loading />
-        ) : query.isError ? (
+        ) : !query.data ? (
           <Notice>{errorMessage(query.error)}</Notice>
         ) : (
           <>

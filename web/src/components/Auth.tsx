@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
+import { useSessionMutation } from "../useSessionMutation";
+import { Activity, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AuthContext,
   authApi,
   authEvent,
+  authDiscardEvent,
+  authDiscard,
+  captureAuthEpoch,
   authExpired,
   authKey,
   roleSchema,
@@ -30,11 +34,7 @@ function Login() {
     mutationFn: () => authApi.login(username, password),
     onSuccess: async (session) => {
       setPassword("");
-      await client.cancelQueries();
-      client.removeQueries({
-        predicate: (query) => query.queryKey[0] !== "auth",
-      });
-      client.getMutationCache().clear();
+      await client.cancelQueries({ queryKey: authKey });
       client.setQueryData(authKey, session);
     },
     onError: () => {
@@ -108,71 +108,117 @@ export function AuthGate({ children }: { children: ReactNode }) {
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
-  const identity = session.data
-    ? `${session.data.user?.username ?? "signed-out"}:${session.data.user?.role ?? "none"}:${String(session.data.user?.must_change_password ?? false)}`
+  const [retained, setRetained] = useState<SessionStatus | null>(null);
+  const identity = session.data?.user
+    ? JSON.stringify([
+        session.data.user.account_id,
+        session.data.user.username,
+        session.data.user.role,
+        session.data.user.must_change_password,
+      ])
     : null;
-  const [readyIdentity, setReadyIdentity] = useState<string | null>(null);
+  const retainedIdentity = retained?.user
+    ? JSON.stringify([
+        retained.user.account_id,
+        retained.user.username,
+        retained.user.role,
+        retained.user.must_change_password,
+      ])
+    : null;
+  const preparedSession = useRef<SessionStatus | undefined>(undefined);
   useEffect(() => {
-    if (identity === null) return;
+    // Fixed editor queries keep their mounted forms through suspended sessions.
+    for (const key of [
+      "status",
+      "raw-settings",
+      "manager",
+      "admins",
+      "mod-settings",
+      "mods",
+      "accounts",
+    ]) {
+      client.setQueryDefaults([key], { gcTime: Infinity });
+    }
+  }, [client]);
+  useEffect(() => {
+    if (preparedSession.current === session.data) return;
+    const preserving =
+      retainedIdentity !== null &&
+      (identity === null || identity === retainedIdentity);
     let mounted = true;
     client
       .cancelQueries({ predicate: (query) => query.queryKey[0] !== "auth" })
       .then(() => {
         if (!mounted) return;
-        client.removeQueries({
-          predicate: (query) => query.queryKey[0] !== "auth",
-        });
-        client.getMutationCache().clear();
-        setReadyIdentity(identity);
-      })
-      .catch(() => {
-        if (mounted)
-          client.setQueryData<SessionStatus>(authKey, {
-            user: null,
-            expires_at: null,
-          });
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [client, identity]);
-  useEffect(() => {
-    let mounted = true;
-    const expire = () => {
-      client
-        .cancelQueries()
-        .then(() => {
-          if (!mounted) return;
+        preparedSession.current = session.data;
+        if (!preserving)
           client.removeQueries({
             predicate: (query) => query.queryKey[0] !== "auth",
           });
-          client.getMutationCache().clear();
-          client.setQueryData<SessionStatus>(authKey, {
-            user: null,
-            expires_at: null,
-          });
-        })
-        .catch(() => {
-          if (mounted)
-            client.setQueryData<SessionStatus>(authKey, {
-              user: null,
-              expires_at: null,
+        client.getMutationCache().clear();
+        if (session.data?.user) {
+          setRetained(session.data);
+          if (preserving)
+            return client.invalidateQueries({
+              predicate: (query) => query.queryKey[0] !== "auth",
             });
-        });
-    };
-    window.addEventListener(authEvent, expire);
+        }
+      })
+      .catch(() => undefined);
     return () => {
       mounted = false;
+    };
+  }, [client, identity, session.data, retainedIdentity]);
+  useEffect(() => {
+    const expire = () => {
+      client.setQueryData<SessionStatus>(authKey, {
+        user: null,
+        expires_at: null,
+      });
+    };
+    const discard = () => {
+      setRetained(null);
+      expire();
+    };
+    window.addEventListener(authEvent, expire);
+    window.addEventListener(authDiscardEvent, discard);
+    return () => {
       window.removeEventListener(authEvent, expire);
+      window.removeEventListener(authDiscardEvent, discard);
     };
   }, [client]);
+  const expiresAt = session.data?.expires_at;
+  useEffect(() => {
+    if (identity === null || expiresAt === null || expiresAt === undefined)
+      return;
+    const epoch = captureAuthEpoch();
+    const timer = window.setTimeout(
+      () => {
+        authExpired(epoch);
+      },
+      Math.min(Math.max(0, expiresAt * 1000 - Date.now()), 2_147_483_647),
+    );
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [identity, expiresAt]);
+  const authenticated = identity !== null && identity === retainedIdentity;
+  const suspended = retained !== null && !authenticated;
+  const protectedContent = retained?.user &&
+    !retained.user.must_change_password && (
+      <Activity mode={authenticated ? "visible" : "hidden"}>
+        <AuthContext.Provider key={retainedIdentity} value={retained}>
+          {children}
+        </AuthContext.Provider>
+      </Activity>
+    );
   if (session.isPending)
     return (
       <main className="auth-login" role="status">
         Connecting…
       </main>
     );
-  if (session.isError)
+  if (session.isError && !session.data)
     return (
       <main className="auth-login">
         <section className="panel auth-form">
@@ -188,7 +234,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
         </section>
       </main>
     );
-  if (!session.data.user) return <Login />;
+  if (!session.data.user)
+    return (
+      <>
+        {protectedContent}
+        {suspended && (
+          <p className="auth-resume">
+            Sign in with the same account to resume your unsaved edits.
+          </p>
+        )}
+        <Login />
+      </>
+    );
   if (session.data.user.must_change_password)
     return (
       <main className="auth-login">
@@ -209,7 +266,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
           <button
             className="button"
             onClick={() => {
-              authApi.logout().then(authExpired).catch(authExpired);
+              const epoch = captureAuthEpoch();
+              authApi
+                .logout()
+                .then(() => {
+                  authDiscard(epoch);
+                })
+                .catch(() => {
+                  authExpired(epoch);
+                });
             }}
           >
             Sign out
@@ -217,16 +282,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
         </section>
       </main>
     );
-  if (readyIdentity !== identity)
-    return (
-      <main className="auth-login" role="status">
-        Connecting…
-      </main>
-    );
   return (
-    <AuthContext.Provider key={identity} value={session.data}>
-      {children}
-    </AuthContext.Provider>
+    <>
+      {protectedContent}
+      {session.isError && (
+        <p role="alert">Connection interrupted. Your edits are still here.</p>
+      )}
+      {!authenticated && (
+        <main className="auth-login" role="status">
+          Connecting…
+        </main>
+      )}
+    </>
   );
 }
 
@@ -234,8 +301,10 @@ function PasswordForm({ changed }: { changed: () => Promise<void> }) {
   const [current, setCurrent] = useState("");
   const [password, setPassword] = useState("");
   const change = useMutation({
+    onMutate: captureAuthEpoch,
     mutationFn: () => authApi.password(current, password),
-    onSuccess: async () => {
+    onSuccess: async (_result, _variables, epoch) => {
+      if (epoch !== captureAuthEpoch()) return;
       setCurrent("");
       setPassword("");
       await changed();
@@ -299,18 +368,30 @@ function PasswordForm({ changed }: { changed: () => Promise<void> }) {
 export function SessionMenu() {
   const { user } = useAccess();
   const client = useQueryClient();
-  const reset = async () => {
-    await client.cancelQueries();
-    client.removeQueries({
-      predicate: (query) => query.queryKey[0] !== "auth",
-    });
-    client.getMutationCache().clear();
+  const reset = async (expected = captureAuthEpoch()) => {
+    if (!authDiscard(expected)) return;
+    const epoch = captureAuthEpoch();
     client.setQueryData<SessionStatus>(authKey, {
       user: null,
       expires_at: null,
     });
+    const signedOut = client.getQueryData(authKey);
+    await client.cancelQueries();
+    if (
+      epoch !== captureAuthEpoch() ||
+      client.getQueryData(authKey) !== signedOut
+    )
+      return;
+    client.removeQueries({
+      predicate: (query) => query.queryKey[0] !== "auth",
+    });
+    client.getMutationCache().clear();
   };
-  const logout = useMutation({ mutationFn: authApi.logout, onSuccess: reset });
+  const logout = useMutation({
+    onMutate: captureAuthEpoch,
+    mutationFn: authApi.logout,
+    onSuccess: (_result, _variables, epoch) => reset(epoch),
+  });
   if (!user) return null;
   return (
     <details className="auth-menu">
@@ -318,7 +399,7 @@ export function SessionMenu() {
         {user.username} <span className="muted">{user.role}</span>
       </summary>
       <div className="panel auth-menu-panel">
-        <PasswordForm changed={reset} />
+        <PasswordForm changed={() => reset()} />
         <button
           className="button"
           disabled={logout.isPending}
@@ -366,11 +447,10 @@ function AccountEditor({
   close: () => void;
 }) {
   const { user } = useAccess();
-  const client = useQueryClient();
   const [role, setRole] = useState(account.role);
   const [password, setPassword] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const save = useMutation({
+  const save = useSessionMutation({
     mutationFn: () =>
       authApi.update({
         revision: document.revision,
@@ -378,18 +458,20 @@ function AccountEditor({
         role,
         password: password || null,
       }),
-    onSuccess: async (result) => {
-      setPassword("");
-      client.setQueryData(["accounts"], result);
-      close();
-      await client.invalidateQueries({ queryKey: authKey });
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["accounts"], result, () => {
+        setPassword("");
+        close();
+      });
+      await session.refresh([authKey]);
     },
   });
-  const remove = useMutation({
+  const remove = useSessionMutation({
     mutationFn: () => authApi.delete(document.revision, account.username),
-    onSuccess: (result) => {
-      client.setQueryData(["accounts"], result);
-      close();
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["accounts"], result, () => {
+        close();
+      });
     },
   });
   return (
@@ -466,7 +548,6 @@ function AccountEditor({
 
 export function AccountPanel() {
   const { canAdmin } = useAccess();
-  const client = useQueryClient();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<Role>("viewer");
@@ -477,7 +558,7 @@ export function AccountPanel() {
     enabled: canAdmin,
     retry: false,
   });
-  const create = useMutation({
+  const create = useSessionMutation({
     mutationFn: () => {
       if (!query.data) throw new Error("Reload accounts before saving");
       return authApi.create({
@@ -487,11 +568,12 @@ export function AccountPanel() {
         role,
       });
     },
-    onSuccess: (result) => {
-      client.setQueryData(["accounts"], result);
-      setUsername("");
-      setPassword("");
-      setRole("viewer");
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["accounts"], result, () => {
+        setUsername("");
+        setPassword("");
+        setRole("viewer");
+      });
     },
   });
   if (!canAdmin) return null;

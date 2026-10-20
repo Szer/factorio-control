@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, FlaskConical, Users } from "lucide-react";
+import { useAccess } from "../authApi";
 import { api, errorMessage, formatDate } from "../api";
 import type { Status, Telemetry } from "../api";
 import { Notice, StatusBadge } from "../components/ui";
@@ -174,6 +175,7 @@ export default function Overview({
   status: Status;
   interval: number;
 }) {
+  const { canAdmin } = useAccess();
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -230,16 +232,23 @@ export default function Overview({
       {data?.error && <Notice>{data.error}</Notice>}
       {data && !data.enabled && (
         <div className="inline-info">
-          Live UPS and research require scripting telemetry. Enable it in{" "}
-          <a
-            href="#settings"
-            onClick={() => {
-              window.dispatchEvent(new Event("open-manager-settings"));
-            }}
-          >
-            Manager settings
-          </a>{" "}
-          after reviewing the achievement implications.
+          Live UPS and research require scripting telemetry.{" "}
+          {canAdmin ? (
+            <>
+              Enable it in{" "}
+              <a
+                href="#settings"
+                onClick={() => {
+                  window.dispatchEvent(new Event("open-manager-settings"));
+                }}
+              >
+                Manager settings
+              </a>{" "}
+              after reviewing the achievement implications.
+            </>
+          ) : (
+            "Ask an administrator to enable it after reviewing the achievement implications."
+          )}
         </div>
       )}
       <div className="live-grid">
