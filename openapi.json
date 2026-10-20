@@ -1671,6 +1671,10 @@
           "name",
           "installed_version",
           "latest_version",
+          "latest_released_at",
+          "factorio_min_version",
+          "compatible",
+          "update_available",
           "authenticated",
           "factorio_version",
           "message"
@@ -1679,11 +1683,23 @@
           "authenticated": {
             "type": "boolean"
           },
+          "compatible": {
+            "type": "boolean"
+          },
+          "factorio_min_version": {
+            "type": "string"
+          },
           "factorio_version": {
             "type": "string"
           },
           "installed_version": {
             "type": "string"
+          },
+          "latest_released_at": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "latest_version": {
             "type": [
@@ -1699,6 +1715,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "update_available": {
+            "type": "boolean"
           }
         }
       },

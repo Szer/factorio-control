@@ -454,11 +454,15 @@ export interface components {
         };
         ModUpdates: {
             authenticated: boolean;
+            compatible: boolean;
+            factorio_min_version: string;
             factorio_version: string;
             installed_version: string;
+            latest_released_at: string | null;
             latest_version: string | null;
             message: string | null;
             name: string;
+            update_available: boolean;
         };
         ModsDocument: {
             mods: components["schemas"]["InstalledMod"][];

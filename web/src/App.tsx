@@ -197,7 +197,7 @@ export default function App() {
                         : page === "settings"
                           ? "Server configuration, administrators, and manager preferences."
                           : page === "mods"
-                            ? "Install, update, and configure mods."
+                            ? "Versions, updates, and compatibility."
                             : "Live server output and events."}
                     </p>
                   </div>
@@ -212,7 +212,7 @@ export default function App() {
                 <SettingsPage />
               </div>
               <div hidden={page !== "mods"}>
-                <Mods status={status.data} />
+                <Mods status={status.data} active={page === "mods"} />
               </div>
               {page === "console" && <Console interval={interval} />}
             </>

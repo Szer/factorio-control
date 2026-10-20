@@ -1,166 +1,256 @@
-import { useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, RefreshCw, Upload } from "lucide-react";
-import { api, ApiError, errorMessage, formatBytes } from "../api";
+import { Fragment, useRef, useState } from "react";
+import {
+  useIsFetching,
+  useIsMutating,
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import type { UseQueryResult } from "@tanstack/react-query";
+import { ArrowUp, Download, RefreshCw, Upload } from "lucide-react";
+import { api, ApiError, errorMessage } from "../api";
 import type {
   ModSettingsChange,
   ModSettingsDocument,
   ModsDocument,
+  ModUpdates,
   Status,
 } from "../api";
 import { Loading, Notice } from "../components/ui";
 import { useUnsavedChanges } from "../useUnsavedChanges";
 
+function releaseDate(value: string | null | undefined): string {
+  if (!value) return "—";
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp)
+    ? "—"
+    : new Date(timestamp).toISOString().slice(0, 10);
+}
+
 function ModRow({
   mod,
   document,
   stopped,
+  updates,
 }: {
   mod: ModsDocument["mods"][number];
   document: ModsDocument;
   stopped: boolean;
+  updates: UseQueryResult<ModUpdates>;
 }) {
   const client = useQueryClient();
-  const updates = useQuery({
-    queryKey: ["mod-updates", mod.name, mod.version],
-    queryFn: () => api.modUpdates(mod.name),
-    enabled: false,
-    retry: false,
-  });
+  const busy = useIsMutating({ mutationKey: ["mod-change"] }) > 0;
   const enable = useMutation({
+    mutationKey: ["mod-change"],
     mutationFn: api.enableMod,
     onSuccess: (result) => {
       client.setQueryData(["mods"], result);
     },
   });
   const update = useMutation({
+    mutationKey: ["mod-change"],
     mutationFn: api.updateMod,
     onSuccess: async (result) => {
       client.setQueryData(["mods"], result);
       await client.invalidateQueries({ queryKey: ["mod-settings"] });
     },
   });
-  const busy = enable.isPending || update.isPending;
+  const incompatible = updates.data?.compatible === false;
+  const outdated = updates.data?.update_available === true;
+  const failure = enable.error ?? update.error;
   return (
-    <div className="mod-row">
-      <div className="mod-identity">
-        <strong>{mod.title || mod.name}</strong>
-        <span>
-          {mod.name} · {mod.version} · {formatBytes(mod.size_bytes)}
-        </span>
-        <p>{mod.description}</p>
-        <small>
-          Factorio {mod.factorio_version} · {mod.author}
-        </small>
-        {mod.dependencies.length > 0 && (
-          <details>
-            <summary>Dependencies</summary>
-            <ul>
-              {mod.dependencies.map((dependency) => (
-                <li key={dependency}>{dependency}</li>
-              ))}
-            </ul>
-          </details>
-        )}
-      </div>
-      <div className="mod-actions">
-        <label className="check-label">
-          <input
-            type="checkbox"
-            checked={mod.enabled}
-            disabled={!stopped || busy}
-            onChange={(event) => {
-              enable.mutate({
-                name: mod.name,
-                revision: document.revision,
-                enabled: event.target.checked,
-              });
-            }}
-          />
-          Enabled
-        </label>
-        <a
-          className="button secondary"
-          href={`/api/mods/${encodeURIComponent(mod.name)}/download`}
-          download={mod.file_name}
-        >
-          <Download size={16} />
-          Download
-        </a>
-        <button
-          className="button secondary"
-          disabled={busy || updates.isFetching}
-          onClick={() => {
-            updates.refetch().catch(() => undefined);
-          }}
-        >
-          <RefreshCw size={16} />
-          {updates.isFetching ? "Checking…" : "Check update"}
-        </button>
-        {updates.data?.latest_version &&
-        updates.data.latest_version !== mod.version ? (
-          <button
-            className="button primary"
-            disabled={!stopped || busy || !updates.data.authenticated}
-            onClick={() => {
-              const version = updates.data.latest_version;
-              if (version)
-                update.mutate({
+    <Fragment>
+      <tr
+        className={
+          incompatible
+            ? "mod-incompatible"
+            : outdated
+              ? "mod-outdated"
+              : undefined
+        }
+      >
+        <td>
+          <div className="mod-name-cell">
+            <input
+              type="checkbox"
+              aria-label={`Enable ${mod.title || mod.name}`}
+              checked={mod.enabled}
+              disabled={!stopped || busy}
+              onChange={(event) => {
+                enable.mutate({
                   name: mod.name,
-                  version,
                   revision: document.revision,
+                  enabled: event.target.checked,
                 });
-            }}
-          >
-            {update.isPending
-              ? "Updating…"
-              : `Update to ${updates.data.latest_version}`}
-          </button>
-        ) : (
-          updates.isSuccess && (
-            <span className="muted">No compatible update found</span>
-          )
-        )}
-      </div>
-      {updates.data?.message && (
-        <div className="inline-info">{updates.data.message}</div>
+              }}
+            />
+            <span
+              className={mod.enabled ? "mod-name" : "mod-name mod-disabled"}
+              title={mod.name}
+            >
+              {mod.title || mod.name}
+            </span>
+            {incompatible && <span className="mod-state">Incompatible</span>}
+            <a
+              className="mod-download"
+              href={`/api/mods/${encodeURIComponent(mod.name)}/download`}
+              download={mod.file_name}
+              aria-label={`Download ${mod.title || mod.name}`}
+              title="Download installed version"
+            >
+              <Download size={16} />
+            </a>
+          </div>
+        </td>
+        <td>{mod.version}</td>
+        <td>
+          {updates.data ? (
+            outdated && updates.data.latest_version ? (
+              <button
+                className="mod-upgrade"
+                disabled={!stopped || busy || !updates.data.authenticated}
+                title={
+                  !updates.data.authenticated
+                    ? "Add Factorio credentials in Server settings to update"
+                    : "Install this version"
+                }
+                aria-label={`Update ${mod.title || mod.name} to ${updates.data.latest_version}`}
+                onClick={() => {
+                  const version = updates.data.latest_version;
+                  if (version)
+                    update.mutate({
+                      name: mod.name,
+                      version,
+                      revision: document.revision,
+                    });
+                }}
+              >
+                <ArrowUp size={15} />
+                {update.isPending ? "Updating…" : updates.data.latest_version}
+              </button>
+            ) : (
+              (updates.data.latest_version ?? "Unavailable")
+            )
+          ) : updates.isError ? (
+            <button
+              className="text-button"
+              title={errorMessage(updates.error)}
+              onClick={() => {
+                updates.refetch().catch(() => undefined);
+              }}
+            >
+              Retry check
+            </button>
+          ) : (
+            <span className="muted">Checking…</span>
+          )}
+        </td>
+        <td>{updates.data?.factorio_min_version ?? mod.factorio_version}</td>
+        <td title={updates.data?.latest_released_at ?? undefined}>
+          {releaseDate(updates.data?.latest_released_at)}
+        </td>
+      </tr>
+      {failure && (
+        <tr>
+          <td colSpan={5}>
+            <Notice>
+              {errorMessage(failure)}{" "}
+              <button
+                className="text-button"
+                onClick={() => {
+                  client
+                    .invalidateQueries({ queryKey: ["mods"] })
+                    .catch(() => undefined);
+                  enable.reset();
+                  update.reset();
+                }}
+              >
+                Refresh mod list
+              </button>
+            </Notice>
+          </td>
+        </tr>
       )}
-      {updates.isError && <Notice>{errorMessage(updates.error)}</Notice>}
-      {enable.isError && (
-        <Notice>
-          {errorMessage(enable.error)}{" "}
-          <button
-            className="text-button"
-            onClick={() => {
-              client
-                .invalidateQueries({ queryKey: ["mods"] })
-                .catch(() => undefined);
-              enable.reset();
-            }}
-          >
-            Refresh mod list
-          </button>
-        </Notice>
-      )}
-      {update.isError && (
-        <Notice>
-          {errorMessage(update.error)}{" "}
-          <button
-            className="text-button"
-            onClick={() => {
-              client
-                .invalidateQueries({ queryKey: ["mods"] })
-                .catch(() => undefined);
-              update.reset();
-            }}
-          >
-            Refresh mod list
-          </button>
-        </Notice>
-      )}
-    </div>
+    </Fragment>
   );
 }
+
+function InstalledModsTable({
+  document,
+  stopped,
+  version,
+}: {
+  document: ModsDocument;
+  stopped: boolean;
+  version: string | null;
+}) {
+  const checks = useQueries({
+    queries: document.mods.map((mod) => ({
+      queryKey: ["mod-updates", mod.name, mod.version, version],
+      queryFn: () => api.modUpdates(mod.name),
+      staleTime: 5 * 60 * 1000,
+      retry: false,
+      refetchOnWindowFocus: false,
+    })),
+  });
+  const outdated = checks.filter(
+    (check) => check.data?.update_available,
+  ).length;
+  const incompatible = checks.filter(
+    (check) => check.data?.compatible === false,
+  ).length;
+  const pending = checks.filter((check) => check.isFetching).length;
+  const failed = checks.filter((check) => check.isError).length;
+  return (
+    <>
+      <div className="mod-summary" aria-live="polite">
+        <span>
+          Latest compatible releases{version ? ` · Factorio ${version}` : ""}
+        </span>
+        <span className="mod-legend outdated">{outdated} upgrades</span>
+        <span className="mod-legend incompatible">
+          {incompatible} incompatible
+        </span>
+        {pending > 0 && <span>{pending} checking…</span>}
+        {failed > 0 && <span>{failed} checks failed · retry below</span>}
+      </div>
+      <div className="table-scroll mods-table-scroll">
+        <table className="mods-table" aria-label="Installed mod versions">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Current</th>
+              <th scope="col">Latest</th>
+              <th
+                scope="col"
+                title="Minimum Factorio version required by the installed mod"
+              >
+                Factorio min.
+              </th>
+              <th scope="col">Released</th>
+            </tr>
+          </thead>
+          <tbody>
+            {document.mods.map((mod, index) => {
+              const check = checks[index];
+              return check ? (
+                <ModRow
+                  key={`${mod.name}:${mod.version}`}
+                  mod={mod}
+                  document={document}
+                  stopped={stopped}
+                  updates={check}
+                />
+              ) : null;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
 function StartupEditor({
   initial,
   stopped,
@@ -468,13 +558,22 @@ function StartupSettings({ stopped }: { stopped: boolean }) {
     </>
   );
 }
-export default function Mods({ status }: { status: Status }) {
+export default function Mods({
+  status,
+  active = true,
+}: {
+  status: Status;
+  active?: boolean;
+}) {
   const [tab, setTab] = useState<"mods" | "startup">("mods");
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const client = useQueryClient();
   const query = useQuery({ queryKey: ["mods"], queryFn: api.mods });
+  const checking = useIsFetching({ queryKey: ["mod-updates"] }) > 0;
+  const changing = useIsMutating({ mutationKey: ["mod-change"] }) > 0;
   const upload = useMutation({
+    mutationKey: ["mod-change"],
     mutationFn: api.uploadMod,
     onSuccess: (result) => {
       client.setQueryData(["mods"], result);
@@ -512,17 +611,28 @@ export default function Mods({ status }: { status: Status }) {
       )}
       <div hidden={tab !== "mods"}>
         <div className="toolbar">
-          <p className="muted">
-            Upload a mod ZIP to install or update it. Older versions are kept
-            for save sync without changing the active version.
-          </p>
+          <button
+            className="button secondary"
+            disabled={checking || !query.data?.mods.length}
+            onClick={() => {
+              client
+                .invalidateQueries({
+                  queryKey: ["mod-updates"],
+                  refetchType: "active",
+                })
+                .catch(() => undefined);
+            }}
+          >
+            <RefreshCw size={16} />
+            {checking ? "Checking updates…" : "Check all updates"}
+          </button>
           <input
             ref={input}
             type="file"
             className="visually-hidden"
             accept=".zip,application/zip"
             aria-label="Upload mod ZIP"
-            disabled={!stopped || upload.isPending}
+            disabled={!stopped || changing}
             onChange={(event) => {
               const file = event.target.files?.[0];
               setError(null);
@@ -536,7 +646,7 @@ export default function Mods({ status }: { status: Status }) {
           />
           <button
             className="button primary"
-            disabled={!stopped || upload.isPending || !query.data}
+            disabled={!stopped || changing || !query.data}
             onClick={() => {
               input.current?.click();
             }}
@@ -575,10 +685,9 @@ export default function Mods({ status }: { status: Status }) {
           <>
             {!query.data.portal_authenticated && (
               <div className="inline-info">
-                Mod portal updates need your Factorio username and token in{" "}
-                <a href="#settings">Server settings</a>, or FACTORIO_USERNAME
-                and FACTORIO_TOKEN in the manager environment. ZIP upload and
-                download work without an account.
+                Installing updates requires a Factorio username and token in{" "}
+                <a href="#settings">Server settings</a>. Version checks work
+                without an account.
               </div>
             )}
             <section className="panel">
@@ -594,14 +703,14 @@ export default function Mods({ status }: { status: Status }) {
                   game.
                 </p>
               ) : (
-                query.data.mods.map((mod) => (
-                  <ModRow
-                    key={`${mod.name}:${mod.version}`}
-                    mod={mod}
+                active &&
+                tab === "mods" && (
+                  <InstalledModsTable
                     document={query.data}
                     stopped={stopped}
+                    version={status.version}
                   />
-                ))
+                )
               )}
             </section>
           </>

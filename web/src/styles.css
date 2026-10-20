@@ -1864,48 +1864,115 @@ textarea::placeholder {
   white-space: pre;
   overflow: auto;
 }
-.mod-row {
-  padding: 16px;
-  border-top: 1px solid #555;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 16px;
-}
-.mod-row > .notice {
-  grid-column: 1 / -1;
-}
-.mod-identity > strong {
-  font-size: 18px;
-  color: #ffe1b3;
-  display: block;
-}
-.mod-identity > span,
-.mod-identity > small {
-  display: block;
-  color: #bfbfbf;
-  font-size: 14px;
-  margin-top: 4px;
-}
-.mod-identity p {
-  margin: 8px 0;
-  font-size: 15px;
-}
-.mod-identity {
-  overflow-wrap: anywhere;
-}
-.mod-identity details {
-  font-size: 14px;
-  margin-top: 8px;
-  color: #ccc;
-}
 summary {
   cursor: pointer;
 }
-.mod-actions {
+.mod-summary {
   display: flex;
-  align-items: stretch;
-  flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  font-size: 14px;
+  color: #c5c5c5;
+}
+.mod-summary > span:first-child {
+  margin-right: auto;
+}
+.mod-legend.outdated {
+  color: #ffcd79;
+}
+.mod-legend.incompatible {
+  color: #ffb3a7;
+}
+.mods-table-scroll {
+  max-height: calc(100dvh - 310px);
+  overflow: auto;
+}
+.mods-table {
+  min-width: 750px;
+}
+.mods-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #292929;
+  padding: 9px 12px;
+}
+.mods-table td {
+  padding: 6px 12px;
+  height: 38px;
+  font-size: 15px;
+  border-top: 1px solid #494949;
+}
+.mods-table td:first-child {
+  width: 48%;
+}
+.mod-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 250px;
+}
+.mod-name-cell input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+.mod-name {
+  color: #ffe1b3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 30rem;
+}
+.mod-disabled {
+  color: #aaa;
+}
+.mod-download {
+  color: #ccc;
+  display: inline-flex;
+  padding: 4px;
+  margin-left: auto;
+}
+.mod-download:hover {
+  color: #ffcd79;
+}
+.mods-table .mod-outdated {
+  background: #493c26;
+  box-shadow: inset 3px 0 #e9a323;
+}
+.mods-table .mod-incompatible {
+  background: #4d302d;
+  box-shadow: inset 3px 0 #ed8979;
+}
+.mod-state {
+  color: #ffb3a7;
+  font-size: 12px;
+  border: 1px solid #97645c;
+  padding: 1px 5px;
+}
+.mod-upgrade {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  background: #e9a323;
+  color: #211a0f;
+  border: 1px solid #ffcc71;
+  padding: 3px 7px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.mod-upgrade:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+.mod-upgrade:focus-visible,
+.mod-download:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
 }
 .check-label {
   display: flex;
@@ -1937,14 +2004,6 @@ summary {
     align-items: flex-start;
     flex-direction: column;
     gap: 8px;
-  }
-  .mod-row {
-    grid-template-columns: 1fr;
-  }
-  .mod-actions {
-    flex-direction: row;
-    align-items: center;
-    flex-wrap: wrap;
   }
 }
 @media (max-width: 680px) {

@@ -184,10 +184,15 @@ export const modUpdatesSchema = z.object({
   name: z.string(),
   installed_version: z.string(),
   latest_version: z.string().nullable(),
+  latest_released_at: z.string().nullable(),
+  factorio_min_version: z.string(),
+  compatible: z.boolean(),
+  update_available: z.boolean(),
   authenticated: z.boolean(),
   factorio_version: z.string(),
   message: z.string().nullable(),
 }) satisfies z.ZodType<components["schemas"]["ModUpdates"]>;
+export type ModUpdates = z.infer<typeof modUpdatesSchema>;
 
 export const saveSyncPlanSchema = z.object({
   revision: z.string(),
