@@ -23,8 +23,7 @@ export function Notice({
 export function Loading() {
   return (
     <div className="loading" role="status">
-      <LoaderCircle className="spin" size={22} /> Connecting to your control
-      room…
+      <LoaderCircle className="spin" size={22} /> Loading…
     </div>
   );
 }
@@ -52,14 +51,14 @@ export function EmptyState({
 }: {
   icon: ReactNode;
   title: string;
-  children: ReactNode;
+  children?: ReactNode;
   action?: ReactNode;
 }) {
   return (
     <div className="empty-state">
       <div className="empty-icon">{icon}</div>
       <h3>{title}</h3>
-      <p>{children}</p>
+      {children && <p>{children}</p>}
       {action}
     </div>
   );

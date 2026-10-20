@@ -598,7 +598,6 @@ function ManagerForm({ initial }: { initial: ManagerDocument }) {
           <div className="section-heading">
             <div>
               <h2>Manager settings</h2>
-              <p>Controls this interface and its live monitoring.</p>
             </div>
           </div>
           <div className="form-fields">

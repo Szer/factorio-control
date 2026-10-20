@@ -136,9 +136,6 @@ export default function Saves({ status }: { status: Status }) {
       <div className="selection-banner">
         <span>Next server start</span>
         <strong>{selection.data?.save ?? "No save selected"}</strong>
-        <span className="muted">
-          Selecting a save takes effect on the next start.
-        </span>
       </div>
       {selection.isError && <Notice>{errorMessage(selection.error)}</Notice>}
       {promote.isError && (
@@ -384,7 +381,6 @@ export default function Saves({ status }: { status: Status }) {
             <h2>
               Saves <span className="count-badge">{saves.data.length}</span>
             </h2>
-            <span className="small-label">STORED LOCALLY</span>
           </div>
           <div className="table-scroll">
             <table>
@@ -407,13 +403,10 @@ export default function Saves({ status }: { status: Status }) {
                           <FileArchive size={19} />
                         </span>
                         <div>
-                          <strong>{save.name.replace(/\.zip$/i, "")}</strong>
-                          <small>
-                            {save.name}
-                            {status.active_save === save.name
-                              ? " · Loaded session"
-                              : ""}
-                          </small>
+                          <strong>{save.name}</strong>
+                          {status.active_save === save.name && (
+                            <small>Loaded session</small>
+                          )}
                         </div>
                       </div>
                     </td>
@@ -473,21 +466,8 @@ export default function Saves({ status }: { status: Status }) {
           {filtered.length === 0 && (
             <div className="search-empty">No saves match “{search}”.</div>
           )}
-          <div className="table-footer">
-            <span>
-              {filtered.length} {filtered.length === 1 ? "save" : "saves"}
-            </span>
-            <span>Your original save is never overwritten by an upload.</span>
-          </div>
         </section>
       )}
-      <div className="subtle-note">
-        <FileArchive size={16} />
-        <p>
-          Bring a save from your single-player game or another server. Choose
-          “Use on next start” to promote a save to the startup save.
-        </p>
-      </div>
     </>
   );
 }

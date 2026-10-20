@@ -164,13 +164,6 @@ function UpsChart({ telemetry, now }: { telemetry: Telemetry; now: number }) {
           </div>
         )}
       </div>
-      <div className="table-footer">
-        <span>
-          Measured game ticks per second. Gaps indicate paused or unavailable
-          samples.
-        </span>
-        <span>{samples.length} samples</span>
-      </div>
     </section>
   );
 }
@@ -205,7 +198,6 @@ export default function Overview({
       <div className="page-heading">
         <div>
           <h1>Overview</h1>
-          <p>Live server status and activity.</p>
         </div>
         <ServerControls status={status} />
       </div>
@@ -318,9 +310,7 @@ export default function Overview({
         </div>
         <div className="activity-list">
           {!data || data.activity.length === 0 ? (
-            <p className="muted activity-empty">
-              Player joins, departures, and completed research appear here.
-            </p>
+            <p className="muted activity-empty">No recent activity.</p>
           ) : (
             [...data.activity]
               .sort((a, b) => b.timestamp - a.timestamp || b.id - a.id)

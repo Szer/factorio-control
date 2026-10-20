@@ -108,7 +108,6 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
                   Game administrators{" "}
                   <span className="count-badge">{admins.length}</span>
                 </h2>
-                <p>Trusted players with permission to manage the game.</p>
               </div>
               <ShieldCheck size={21} />
             </div>
@@ -140,7 +139,7 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
             {admins.length === 0 ? (
               <EmptyState
                 icon={<ShieldCheck size={29} />}
-                title="A trusted crew starts with you."
+                title="No administrators"
               >
                 Add your Factorio username to become a game administrator.
               </EmptyState>
@@ -153,9 +152,7 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
                     </span>
                     <span>
                       <strong>{admin}</strong>
-                      <small>Game administrator</small>
                     </span>
-                    <span className="admin-role">Admin</span>
                     <button
                       className="icon-button"
                       aria-label={`Remove ${admin}`}
@@ -176,11 +173,6 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
             <span className="aside-icon">
               <ShieldCheck size={20} />
             </span>
-            <h3>The keys to the factory.</h3>
-            <p>
-              Administrators can run game commands and manage other players.
-              Only add people you trust.
-            </p>
             <p>
               Use their exact Factorio username. These are game permissions,
               separate from access to this control room.

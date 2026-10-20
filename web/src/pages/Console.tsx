@@ -60,14 +60,8 @@ export default function Console({ interval }: { interval: number }) {
         ) : visible.length === 0 ? (
           <EmptyState
             icon={<Terminal size={28} />}
-            title={
-              filter ? "No matching output." : "Listening for your factory."
-            }
-          >
-            {filter
-              ? "Try a different search."
-              : "Process output and control events appear here when your server starts."}
-          </EmptyState>
+            title={filter ? "No matching output." : "No output yet."}
+          />
         ) : (
           <div
             className="log-output"
@@ -99,13 +93,6 @@ export default function Console({ interval }: { interval: number }) {
           </span>
         </div>
       </section>
-      <div className="subtle-note">
-        <Terminal size={16} />
-        <p>
-          This view shows server output. In-game commands will be available when
-          RCON support is connected.
-        </p>
-      </div>
     </>
   );
 }

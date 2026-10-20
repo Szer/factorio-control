@@ -1,15 +1,12 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowUpRight,
   Box,
   ChevronRight,
-  CircleHelp,
   Factory,
   LayoutDashboard,
   Menu,
   Settings2,
-  ShieldCheck,
   Terminal,
   Package,
   X,
@@ -70,16 +67,13 @@ export default function App() {
             FACTORIO<span className="brand-sub">CONTROL</span>
           </span>
         </a>
-        <div className="workspace-label">SERVER</div>
         <div className="workspace-card">
           <span className="workspace-symbol">
             {settings.data?.settings.name.charAt(0).toUpperCase() ?? "F"}
           </span>
           <div>
             <strong>{settings.data?.settings.name ?? "Your server"}</strong>
-            <span>Local instance</span>
           </div>
-          <ChevronRight size={14} />
         </div>
         <nav aria-label="Main navigation">
           {navigation.map(({ id, label, icon: Icon }) => (
@@ -91,33 +85,9 @@ export default function App() {
             >
               <Icon size={18} strokeWidth={1.7} />
               {label}
-              {id === "console" && <span className="nav-shortcut">&gt;_</span>}
             </a>
           ))}
         </nav>
-        <div className="sidebar-bottom">
-          <div className="local-note">
-            <ShieldCheck size={16} />
-            <span>
-              Local control
-              <br />
-              <small>Local instance</small>
-            </span>
-          </div>
-          <a
-            className="help-link"
-            href="https://wiki.factorio.com/Multiplayer"
-            target="_blank"
-            rel="noreferrer"
-          >
-            <CircleHelp size={16} />
-            Factorio server guide
-            <ArrowUpRight size={13} />
-          </a>
-          <div className="build-label">
-            <span className="tiny-dot" /> EARLY ACCESS <span>v0.1.0</span>
-          </div>
-        </div>
       </aside>
       {menuOpen && (
         <button
@@ -145,15 +115,6 @@ export default function App() {
             <span>Server</span>
             <ChevronRight size={13} />
             <strong>{title}</strong>
-          </div>
-          <div className="topbar-right">
-            <span className="local-badge">
-              <span className={`tiny-dot ${status.isError ? "offline" : ""}`} />
-              {status.isError ? "Connection lost" : "Local connection"}
-            </span>
-            <div className="avatar" aria-label="Local operator">
-              OP
-            </div>
           </div>
         </header>
         <main id="main-content">
@@ -189,17 +150,7 @@ export default function App() {
               {page !== "overview" && (
                 <div className="page-heading">
                   <div>
-                    <div className="eyebrow">CONTROL ROOM</div>
                     <h1>{title}</h1>
-                    <p>
-                      {page === "saves"
-                        ? "Upload, select, and download saves."
-                        : page === "settings"
-                          ? "Server configuration, administrators, and manager preferences."
-                          : page === "mods"
-                            ? "Versions, updates, and compatibility."
-                            : "Live server output and events."}
-                    </p>
                   </div>
                   <StatusBadge state={status.data.state} />
                 </div>
@@ -217,12 +168,6 @@ export default function App() {
               {page === "console" && <Console interval={interval} />}
             </>
           )}
-          <footer className="page-footer">
-            <span>Factorio server management</span>
-            <span>
-              FACTORIO CONTROL <span className="footer-dot">·</span> LOCAL
-            </span>
-          </footer>
         </main>
       </div>
     </div>
