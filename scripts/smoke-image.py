@@ -128,6 +128,7 @@ try:
     require(request("/api/server/start", {"save": "smoke-world.zip"})[0] == 200, "Second game start failed")
     wait_state({"running", "paused"})
     command("restart", "--time", "150", name, timeout=170)
+    port = int(command("port", name, "8080/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
     wait_ready()
     require(request("/api/status")[0] == 401, "Session survived restart")
     require(command("exec", name, "test", "!", "-e", "/data/bootstrap-admin.json", check=False).returncode == 0, "Restart recreated bootstrap credentials")
