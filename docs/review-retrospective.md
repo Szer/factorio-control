@@ -7,7 +7,7 @@ The review exposes missing behavioral coverage across trust boundaries, concurre
 | Gap | Why existing checks miss it | Required coverage |
 | --- | --- | --- |
 | Trusted metadata derived from logs | A well-formed string can still come from player chat. | Spoofed chat/log lines never change the version obtained from the configured binary. |
-| Authentication availability | A test that proves throttling activates does not prove which clients it blocks. | Separate real TCP clients, targeted usernames, forged forwarding headers, trusted proxy chains, cache saturation and expiry. |
+| Authentication availability | A test that proves throttling activates does not prove which clients it blocks. | Separate real TCP clients, targeted usernames, forged forwarding headers, cache saturation/expiry and an isolated reverse-proxy container with verified transport identity. |
 | Unrealistic resource fixtures | Tiny ZIPs do not exercise real asset sizes, streaming or async worker starvation. | Chunked 70 MiB mod and 200 MiB save uploads, bounded archive validation and slow export barriers. |
 | Recovery specified as rejection | Preserving an error is weaker than recovering an interrupted operation. | Restart, retry and every mutating entry point recover valid journals; malformed journals fail closed. |
 | Function tests bypass routing | A valid operation can be unreachable because a static route shadows a mod name. | Exercise every reserved mod name through the HTTP router. |
