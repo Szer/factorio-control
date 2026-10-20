@@ -39,10 +39,14 @@ pub struct Visibility {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServerSettings {
+    #[schema(min_length = 1, max_length = 100)]
     pub name: String,
+    #[schema(max_length = 2000)]
     pub description: String,
+    #[schema(maximum = 65535)]
     pub max_players: u32,
     pub auto_pause: bool,
+    #[schema(maximum = 1440)]
     pub autosave_interval: u32,
     pub visibility: Visibility,
 }

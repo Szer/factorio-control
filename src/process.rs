@@ -19,9 +19,8 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
         .as_ref()
         .ok_or_else(|| Error::bad("Configure FC_FACTORIO_BIN before starting a server"))?;
     let settings = storage::settings(&app.settings_path())?;
-    if settings.revision == "missing" {
-        storage::update_settings(&app.settings_path(), settings)?;
-    }
+    storage::update_settings(&app.settings_path(), settings)?;
+    let redactions = std::sync::Arc::new(storage::log_redactions(&app.settings_path())?);
     let admins = storage::admins(&app.admins_path())?;
     if admins.revision == "missing" {
         storage::update_admins(&app.admins_path(), admins)?;
@@ -52,7 +51,7 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
         .arg(app.admins_path())
         .arg("--config")
         .arg(config)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -72,10 +71,22 @@ pub async fn start(app: &App, name: &str) -> Result<Status> {
     inner.generation = inner.generation.saturating_add(1);
     let generation = inner.generation;
     if let Some(stdout) = child.stdout.take() {
-        tokio::spawn(pump(app.clone(), stdout, LogLevel::Info, generation));
+        tokio::spawn(pump(
+            app.clone(),
+            stdout,
+            LogLevel::Info,
+            generation,
+            redactions.clone(),
+        ));
     }
     if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(pump(app.clone(), stderr, LogLevel::Warn, generation));
+        tokio::spawn(pump(
+            app.clone(),
+            stderr,
+            LogLevel::Warn,
+            generation,
+            redactions,
+        ));
     }
     inner.child = Some(child);
     inner.stopping_at = None;
@@ -185,14 +196,22 @@ pub async fn poll(app: &App) {
         }
     }
 }
-async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64) {
-    let message = String::from_utf8_lossy(bytes)
+async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64, redactions: &[String]) {
+    let mut message = String::from_utf8_lossy(bytes)
         .trim_end_matches('\r')
         .to_owned();
+    let level = if message.contains(" Error ") {
+        LogLevel::Error
+    } else if message.contains(" Warning ") {
+        LogLevel::Warn
+    } else {
+        level
+    };
     let mut inner = app.inner.lock().await;
     if inner.generation == generation
         && inner.status.state == ServerState::Starting
-        && (message.contains("Hosting game at IP ADDR:") || message.contains("to(InGame)"))
+        && message.contains("ServerMultiplayerManager")
+        && message.contains("to(InGame)")
     {
         inner.status.state = ServerState::Running;
     }
@@ -204,23 +223,32 @@ async fn record(app: &App, level: LogLevel, bytes: &[u8], generation: u64) {
     {
         inner.status.version = Some(version.into());
     }
+    for secret in redactions {
+        message = message.replace(secret, "[redacted]");
+    }
     log(&mut inner, level, message);
 }
-async fn pump(app: App, mut reader: impl AsyncRead + Unpin, level: LogLevel, generation: u64) {
+async fn pump(
+    app: App,
+    mut reader: impl AsyncRead + Unpin,
+    level: LogLevel,
+    generation: u64,
+    redactions: std::sync::Arc<Vec<String>>,
+) {
     let mut chunk = [0_u8; 4096];
     let mut line = Vec::new();
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) => {
                 if !line.is_empty() {
-                    record(&app, level.clone(), &line, generation).await;
+                    record(&app, level.clone(), &line, generation, &redactions).await;
                 }
                 break;
             }
             Ok(size) => {
                 for byte in &chunk[..size] {
                     if *byte == b'\n' {
-                        record(&app, level.clone(), &line, generation).await;
+                        record(&app, level.clone(), &line, generation, &redactions).await;
                         line.clear();
                     } else if line.len() < 16384 {
                         line.push(*byte);

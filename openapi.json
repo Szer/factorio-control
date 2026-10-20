@@ -511,18 +511,23 @@
           "autosave_interval": {
             "type": "integer",
             "format": "int32",
+            "maximum": 1440,
             "minimum": 0
           },
           "description": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 2000
           },
           "max_players": {
             "type": "integer",
             "format": "int32",
+            "maximum": 65535,
             "minimum": 0
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1
           },
           "visibility": {
             "$ref": "#/components/schemas/Visibility"

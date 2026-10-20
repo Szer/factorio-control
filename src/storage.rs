@@ -106,11 +106,11 @@ pub fn settings(path: &Path) -> Result<SettingsDocument> {
 }
 pub fn update_settings(path: &Path, document: SettingsDocument) -> Result<SettingsDocument> {
     if document.settings.name.trim().is_empty()
-        || document.settings.name.len() > 200
-        || document.settings.description.len() > 4000
+        || document.settings.name.chars().count() > 100
+        || document.settings.description.chars().count() > 2000
     {
         return Err(Error::bad(
-            "Provide a server name up to 200 bytes and description up to 4000 bytes",
+            "Provide a server name up to 100 characters and description up to 2000 characters",
         ));
     }
     if document.settings.max_players > 65535 || document.settings.autosave_interval > 1440 {
@@ -162,12 +162,14 @@ pub fn update_admins(path: &Path, document: AdminsDocument) -> Result<AdminsDocu
     for name in &document.admins {
         if name.trim() != name
             || name.is_empty()
-            || name.len() > 100
-            || name.chars().any(char::is_control)
+            || name.chars().count() > 64
+            || name
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace() || c == ',')
             || !names.insert(name.to_lowercase())
         {
             return Err(Error::bad(
-                "Administrator names must be unique, nonempty, without surrounding whitespace or control characters",
+                "Administrator names must be unique, nonempty, up to 64 characters, without whitespace, commas or control characters",
             ));
         }
     }
@@ -184,10 +186,10 @@ pub fn save_path(directory: &Path, name: &str) -> Result<PathBuf> {
     ensure_directory(directory)?;
     if name.is_empty()
         || name.len() > 240
-        || !name.ends_with(".zip")
+        || !name.to_ascii_lowercase().ends_with(".zip")
         || name.contains(['/', '\\'])
         || name.chars().any(char::is_control)
-        || name == ".zip"
+        || name.eq_ignore_ascii_case(".zip")
     {
         return Err(Error::bad("Save name must be a basename ending in .zip"));
     }
@@ -218,7 +220,7 @@ pub fn saves(directory: &Path) -> Result<Vec<Save>> {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if name.ends_with(".zip") {
+        if name.to_ascii_lowercase().ends_with(".zip") {
             result.push(save_info(directory, &name)?);
         }
     }
@@ -249,4 +251,23 @@ pub fn validate_save(bytes: &[u8]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub fn log_redactions(path: &Path) -> Result<Vec<String>> {
+    let (_, bytes) = read_document(path)?;
+    let map = settings_map(bytes.as_deref())?;
+    let mut secrets = Vec::new();
+    for key in ["token", "game_password", "password", "rcon_password"] {
+        if let Some(secret) = map
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+        {
+            secrets.push(secret.to_owned());
+            secrets.push(url::form_urlencoded::byte_serialize(secret.as_bytes()).collect());
+        }
+    }
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    secrets.dedup();
+    Ok(secrets)
 }
