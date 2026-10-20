@@ -231,6 +231,7 @@ name = "factorio-control"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "http-body-util",
  "nix",
  "reqwest",
  "serde",

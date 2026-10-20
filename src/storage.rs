@@ -3,12 +3,13 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
 pub const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
+pub const MAX_SAVE_BYTES: u64 = 1024 * 1024 * 1024;
 
 pub fn ensure_regular(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -344,7 +345,10 @@ pub fn saves(directory: &Path) -> Result<Vec<Save>> {
     Ok(result)
 }
 pub fn validate_save(bytes: &[u8]) -> Result<()> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+    validate_save_reader(std::io::Cursor::new(bytes))
+}
+pub fn validate_save_reader(reader: impl Read + Seek) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(reader)
         .map_err(|_| Error::bad("Upload is not a readable ZIP archive"))?;
     if archive.len() > 10000 {
         return Err(Error::bad("Archive contains too many entries"));
@@ -366,6 +370,23 @@ pub fn validate_save(bytes: &[u8]) -> Result<()> {
             "Archive does not contain a Factorio world (level.dat or level.dat0)",
         ));
     }
+    Ok(())
+}
+
+pub fn persist_save(temporary: tempfile::NamedTempFile, path: &Path) -> Result<()> {
+    ensure_regular(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::bad("Missing parent directory"))?;
+    ensure_directory(parent)?;
+    temporary.persist_noclobber(path).map_err(|error| {
+        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::conflict("A save with that name already exists")
+        } else {
+            error.error.into()
+        }
+    })?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 

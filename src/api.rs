@@ -1,13 +1,15 @@
 use crate::{App, Error, Result, models::*, process, storage};
 use axum::{
     Json, Router,
-    body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, State, rejection::JsonRejection},
+    body::Body,
+    extract::{Path, State, rejection::JsonRejection},
     http::{Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use http_body_util::BodyExt;
+use tokio::io::AsyncWriteExt;
 use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
 
@@ -71,12 +73,7 @@ pub fn router(app: App, static_path: &std::path::Path) -> Router {
         .route("/status", get(status))
         .route("/telemetry", get(telemetry))
         .route("/saves", get(saves))
-        .route(
-            "/saves/{name}",
-            get(download)
-                .post(upload)
-                .layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
-        )
+        .route("/saves/{name}", get(download).post(upload))
         .route(
             "/saves/selection",
             get(get_save_selection).put(put_save_selection),
@@ -313,27 +310,81 @@ async fn stop(
     }
     Ok(Json(process::stop(&app).await?))
 }
-#[utoipa::path(post, path="/api/saves/{name}", params(("name"=String, Path)), request_body(content=String, content_type="application/zip"), responses((status=201, body=Save), (status=400, body=ApiError), (status=409, body=ApiError)))]
+#[utoipa::path(post, path="/api/saves/{name}", params(("name"=String, Path)), request_body(content=String, content_type="application/zip"), responses((status=201, body=Save), (status=400, body=ApiError), (status=409, body=ApiError), (status=413, body=ApiError)))]
 async fn upload(
     State(app): State<App>,
     Path(name): Path<String>,
-    bytes: std::result::Result<Bytes, axum::extract::rejection::BytesRejection>,
+    request: Request<Body>,
 ) -> Result<(StatusCode, Json<Save>)> {
-    let bytes = bytes.map_err(|e| Error {
-        status: e.status(),
-        message: e.body_text(),
-    })?;
+    if request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > storage::MAX_SAVE_BYTES)
+    {
+        return Err(save_upload_too_large());
+    }
+    {
+        let _guard = app.inner.lock().await;
+        let path = storage::save_path(&app.saves_path(), &name)?;
+        if path.exists() {
+            return Err(Error::conflict("A save with that name already exists"));
+        }
+    }
+    let temporary = receive_save(
+        &app.saves_path(),
+        request.into_body(),
+        storage::MAX_SAVE_BYTES,
+    )
+    .await?;
     let _guard = app.inner.lock().await;
     let path = storage::save_path(&app.saves_path(), &name)?;
-    if path.exists() {
-        return Err(Error::conflict("A save with that name already exists"));
-    }
-    storage::validate_save(&bytes)?;
-    storage::atomic_write(&path, &bytes, false)?;
+    storage::persist_save(temporary, &path)?;
     Ok((
         StatusCode::CREATED,
         Json(storage::save_info(&app.saves_path(), &name)?),
     ))
+}
+async fn receive_save(
+    directory: &std::path::Path,
+    mut body: Body,
+    limit: u64,
+) -> Result<tempfile::NamedTempFile> {
+    let temporary = tempfile::Builder::new()
+        .prefix(".upload-")
+        .tempfile_in(directory)?;
+    let (file, temporary_path) = temporary.into_parts();
+    let mut file = tokio::fs::File::from_std(file);
+    let mut received = 0_u64;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| Error::bad("Save upload was interrupted"))?;
+        if let Ok(bytes) = frame.into_data() {
+            if bytes.len() as u64 > limit - received {
+                return Err(save_upload_too_large());
+            }
+            received += bytes.len() as u64;
+            file.write_all(&bytes).await?;
+        }
+    }
+    file.sync_all().await?;
+    let file = file.into_std().await;
+    tokio::task::spawn_blocking(move || {
+        let mut temporary = tempfile::NamedTempFile::from_parts(file, temporary_path);
+        storage::validate_save_reader(temporary.as_file_mut())?;
+        Ok::<_, Error>(temporary)
+    })
+    .await
+    .map_err(|_| Error {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: "Save validation failed".into(),
+    })?
+}
+fn save_upload_too_large() -> Error {
+    Error {
+        status: StatusCode::PAYLOAD_TOO_LARGE,
+        message: "Save upload exceeds 1 GiB".into(),
+    }
 }
 #[utoipa::path(get, path="/api/saves/{name}", params(("name"=String, Path)), responses((status=200, content_type="application/zip"), (status=400, body=ApiError), (status=404, body=ApiError)))]
 async fn download(State(app): State<App>, Path(name): Path<String>) -> Result<Response> {
@@ -359,4 +410,60 @@ async fn telemetry(State(app): State<App>) -> Result<Json<crate::telemetry::Snap
         manager.enable_script_telemetry,
         manager.poll_interval_seconds,
     )))
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    use std::io;
+
+    #[tokio::test]
+    async fn chunked_upload_limit_removes_temporary_file()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (mut writer, reader) = tokio::io::duplex(128);
+        let producer = tokio::spawn(async move {
+            writer.write_all(&[0; 128]).await?;
+            writer.write_all(&[0; 128]).await
+        });
+        let body = Body::from_stream(tokio_util::io::ReaderStream::with_capacity(reader, 128));
+        let result = receive_save(directory.path(), body, 128).await;
+        assert!(matches!(
+            result,
+            Err(Error {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                ..
+            })
+        ));
+        producer.await??;
+        assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_body_removes_temporary_file()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        struct FailedReader;
+        impl tokio::io::AsyncRead for FailedReader {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                std::task::Poll::Ready(Err(io::Error::other("Disconnected")))
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let body = Body::from_stream(tokio_util::io::ReaderStream::new(FailedReader));
+        let result = receive_save(directory.path(), body, storage::MAX_SAVE_BYTES).await;
+        assert!(matches!(
+            result,
+            Err(Error {
+                status: StatusCode::BAD_REQUEST,
+                ..
+            })
+        ));
+        assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
+        Ok(())
+    }
 }

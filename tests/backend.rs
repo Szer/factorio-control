@@ -230,6 +230,129 @@ async fn upload_is_validated_never_overwrites_and_downloads_exact_bytes() -> Tes
     Ok(())
 }
 
+fn save_upload_request(name: &str, body: Body) -> Result<Request<Body>, axum::http::Error> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/api/saves/{name}"))
+        .header("Host", "localhost:9400")
+        .header("Origin", "http://localhost:9400")
+        .header("Content-Type", "application/zip")
+        .body(body)
+}
+
+async fn wait_for_upload(directory: &std::path::Path) -> TestResult {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fs::read_dir(directory)?.next().is_some() {
+                return Ok::<_, std::io::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn save_upload_streams_two_hundred_mib_without_content_length() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source = tempfile::NamedTempFile::new_in(dir.path())?;
+    let mut zip = zip::ZipWriter::new(source.reopen()?);
+    zip.start_file(
+        "world/level.dat0",
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )?;
+    let chunk = [0_u8; 256 * 1024];
+    for _ in 0..800 {
+        zip.write_all(&chunk)?;
+    }
+    let file = zip.finish()?;
+    let size = file.metadata()?.len();
+    let app = App::new(dir.path().join("data"), None).map_err(app_error)?;
+    let destination = app.saves_path().join("large.zip");
+    let router = api::router(app, dir.path());
+    let stream = tokio_util::io::ReaderStream::with_capacity(
+        tokio::fs::File::open(source.path()).await?,
+        256 * 1024,
+    );
+    let response = router
+        .oneshot(save_upload_request("large.zip", Body::from_stream(stream))?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(fs::metadata(&destination)?.len(), size);
+    storage::validate_save_reader(fs::File::open(destination)?).map_err(app_error)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn save_upload_rechecks_conflicts_without_holding_app_lock() -> TestResult {
+    use tokio::io::AsyncWriteExt;
+    let dir = tempfile::tempdir()?;
+    let app = App::new(dir.path().join("data"), None).map_err(app_error)?;
+    let saves = app.saves_path();
+    let router = api::router(app.clone(), dir.path());
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("world/level.dat0", zip::write::SimpleFileOptions::default())?;
+    zip.write_all(b"synthetic world")?;
+    let bytes = zip.finish()?.into_inner();
+    let (mut writer, reader) = tokio::io::duplex(1024);
+    let request = save_upload_request(
+        "world.zip",
+        Body::from_stream(tokio_util::io::ReaderStream::new(reader)),
+    )?;
+    let uploading = tokio::spawn(router.clone().oneshot(request));
+    writer.write_all(&bytes[..8]).await?;
+    wait_for_upload(&saves).await?;
+    let guard = tokio::time::timeout(Duration::from_secs(1), app.inner.lock()).await?;
+    drop(guard);
+    let response = router
+        .oneshot(save_upload_request("world.zip", Body::from(bytes.clone()))?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    writer.write_all(&bytes[8..]).await?;
+    drop(writer);
+    assert_eq!(uploading.await??.status(), StatusCode::CONFLICT);
+    assert_eq!(fs::read(saves.join("world.zip"))?, bytes);
+    assert_eq!(fs::read_dir(saves)?.count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_invalid_and_declared_oversize_uploads_leave_no_files() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let app = App::new(dir.path().join("data"), None).map_err(app_error)?;
+    let saves = app.saves_path();
+    let router = api::router(app, dir.path());
+    let (writer, reader) = tokio::io::duplex(1024);
+    let request = save_upload_request(
+        "cancelled.zip",
+        Body::from_stream(tokio_util::io::ReaderStream::new(reader)),
+    )?;
+    let uploading = tokio::spawn(router.clone().oneshot(request));
+    wait_for_upload(&saves).await?;
+    uploading.abort();
+    assert!(uploading.await.is_err());
+    drop(writer);
+    assert_eq!(fs::read_dir(&saves)?.count(), 0);
+    let invalid = save_upload_request("invalid.zip", Body::from("Not a ZIP"))?;
+    assert_eq!(
+        router.clone().oneshot(invalid).await?.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(fs::read_dir(&saves)?.count(), 0);
+    let mut oversize = save_upload_request("oversize.zip", Body::empty())?;
+    oversize.headers_mut().insert(
+        "Content-Length",
+        (storage::MAX_SAVE_BYTES + 1).to_string().parse()?,
+    );
+    assert_eq!(
+        router.oneshot(oversize).await?.status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(fs::read_dir(saves)?.count(), 0);
+    Ok(())
+}
+
 #[tokio::test]
 async fn hosting_socket_is_not_readiness_and_config_secrets_are_redacted() -> TestResult {
     let dir = tempfile::tempdir()?;
