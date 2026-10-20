@@ -71,7 +71,7 @@ export default function App() {
             FACTORIO<span className="brand-sub">CONTROL</span>
           </span>
         </a>
-        <div className="workspace-label">WORKSPACE</div>
+        <div className="workspace-label">SERVER</div>
         <div className="workspace-card">
           <span className="workspace-symbol">
             {settings.data?.settings.name.charAt(0).toUpperCase() ?? "F"}
@@ -102,7 +102,7 @@ export default function App() {
             <span>
               Local control
               <br />
-              <small>Your factory. Your machine.</small>
+              <small>Local instance</small>
             </span>
           </div>
           <a
@@ -143,14 +143,14 @@ export default function App() {
             >
               {menuOpen ? <X size={20} /> : <Menu size={20} />}
             </button>
-            <span>Workspace</span>
+            <span>Server</span>
             <ChevronRight size={13} />
             <strong>{title}</strong>
           </div>
           <div className="topbar-right">
             <span className="local-badge">
               <span className={`tiny-dot ${status.isError ? "offline" : ""}`} />
-              {status.isError ? "Connection lost" : "Local workspace"}
+              {status.isError ? "Connection lost" : "Local connection"}
             </span>
             <div className="avatar" aria-label="Local operator">
               OP
@@ -194,12 +194,12 @@ export default function App() {
                     <h1>{title}</h1>
                     <p>
                       {page === "worlds"
-                        ? "A home for every factory you build."
+                        ? "Upload, select, and download saves."
                         : page === "settings"
-                          ? "Make this server your own."
+                          ? "Configure your Factorio server."
                           : page === "players"
-                            ? "The people you trust with your factory."
-                            : "A live view of what’s happening under the hood."}
+                            ? "Manage server administrators."
+                            : "Live server output and events."}
                     </p>
                   </div>
                   <StatusBadge state={status.data.state} />
@@ -219,7 +219,7 @@ export default function App() {
             </>
           )}
           <footer className="page-footer">
-            <span>Built for the factory that keeps growing.</span>
+            <span>Factorio server management</span>
             <span>
               FACTORIO CONTROL <span className="footer-dot">·</span> LOCAL
             </span>

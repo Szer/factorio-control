@@ -3,7 +3,6 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import "@fontsource-variable/dm-sans";
-import "@fontsource-variable/space-grotesk";
 import "./styles.css";
 
 const root = document.getElementById("root");

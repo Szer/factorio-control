@@ -16,7 +16,6 @@ import type { Status } from "../api";
 import type { Page } from "../routes";
 import { Notice, StatusBadge } from "../components/ui";
 import ServerControls from "../components/ServerControls";
-import WorldArt from "../components/WorldArt";
 
 export default function Overview({
   status,
@@ -37,11 +36,8 @@ export default function Overview({
     <>
       <div className="page-heading">
         <div>
-          <div className="eyebrow">YOUR FACTORY AT A GLANCE</div>
-          <h1>
-            Overview<span className="heading-dot">.</span>
-          </h1>
-          <p>A little less managing. A little more building.</p>
+          <h1>Server control</h1>
+          <p>Manage your Factorio server.</p>
         </div>
         <ServerControls status={status} />
       </div>
@@ -51,11 +47,9 @@ export default function Overview({
           <div className="hero-kicker">
             <span className="tiny-dot" /> YOUR FACTORIO SERVER
           </div>
-          <h2>{settings.data?.settings.name ?? "Your next great factory"}</h2>
+          <h2>{settings.data?.settings.name ?? "Your server"}</h2>
           <p>
-            {running
-              ? "The belts are moving. Your world is online and ready for company."
-              : "Every great factory starts with a plan. Your control room is ready when you are."}
+            {settings.data?.settings.description || "Factorio headless server"}
           </p>
           <div className="hero-bottom">
             <StatusBadge state={status.state} />
@@ -69,7 +63,6 @@ export default function Overview({
             </span>
           </div>
         </div>
-        <WorldArt />
       </section>
       <div className="stat-grid">
         <div className="stat-card">
@@ -130,12 +123,10 @@ export default function Overview({
             <div>
               <h2>
                 {!status.binary_available || saves.data?.length === 0
-                  ? "Ready for launch"
-                  : "Your workspace"}
+                  ? "Server setup"
+                  : "Server management"}
               </h2>
-              <p>Everything your factory needs.</p>
             </div>
-            <span className="small-label">SETUP</span>
           </div>
           <div className="setup-list">
             <div className="setup-item">
@@ -172,9 +163,9 @@ export default function Overview({
                 <Box size={17} />
               </span>
               <span>
-                <strong>Bring your world</strong>
+                <strong>Saved worlds</strong>
                 <span className="item-description">
-                  Upload a save and pick up where you left off.
+                  Upload or select a save.
                 </span>
               </span>
               <ArrowRight size={17} />
@@ -189,9 +180,9 @@ export default function Overview({
                 <Settings2 size={17} />
               </span>
               <span>
-                <strong>Make yourself at home</strong>
+                <strong>Server settings</strong>
                 <span className="item-description">
-                  Name your server and choose how people join.
+                  Configure access and autosaves.
                 </span>
               </span>
               <ArrowRight size={17} />
@@ -202,7 +193,6 @@ export default function Overview({
           <div className="section-heading">
             <div>
               <h2>Recent activity</h2>
-              <p>A little context, at a glance.</p>
             </div>
             <button
               className="icon-button"
@@ -251,8 +241,8 @@ export default function Overview({
           <Users size={21} />
         </span>
         <span>
-          <strong>Factories are better with friends.</strong>
-          <span>Add trusted administrators to help run your world.</span>
+          <strong>Administrators</strong>
+          <span>Manage who can administer the server.</span>
         </span>
         <ArrowRight size={19} />
       </button>
