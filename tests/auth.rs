@@ -26,6 +26,7 @@ fn app(auth: Auth) -> Router {
         .route("/api/server/start", post(|| async { "{}" }))
         .route("/api/saves/create", post(|| async { "{}" }))
         .route("/api/saves/example.zip", post(|| async { "{}" }))
+        .route("/api/saves/World.ZIP", post(|| async { "{}" }))
         .layer(middleware::from_fn_with_state(auth, auth::guard))
 }
 fn configured(path: &Path, public_url: Option<&str>) -> std::result::Result<Auth, Error> {
@@ -49,6 +50,10 @@ async fn call(
     let mut request = Request::builder()
         .method(method)
         .uri(path)
+        .extension(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            12345,
+        ))))
         .header(header::HOST, host);
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, cookie);
@@ -414,8 +419,7 @@ async fn login_failures_are_generic_and_rate_limited() -> TestResult {
         Some(json!({"username":"missing","password":"incorrect"})),
     )
     .await?;
-    assert_eq!(unknown.status, StatusCode::UNAUTHORIZED);
-    assert_eq!(unknown.body["message"], "Invalid account name or password");
+    assert_eq!(unknown.status, StatusCode::TOO_MANY_REQUESTS);
     Ok(())
 }
 
@@ -811,5 +815,269 @@ fn bootstrap_refuses_linked_or_public_credential_files() -> TestResult {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
     assert!(Auth::load(&data, None).is_err());
     assert!(!data.join("panel-accounts.json").exists());
+    Ok(())
+}
+
+async fn login_from(
+    router: &Router,
+    peer: Option<SocketAddr>,
+    forwarded: Option<&str>,
+    username: &str,
+    password: &str,
+) -> Result<StatusCode, Box<dyn std::error::Error>> {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/login")
+        .header(header::HOST, "localhost:9400")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(peer) = peer {
+        request = request.extension(axum::extract::ConnectInfo(peer));
+    }
+    if let Some(forwarded) = forwarded {
+        request = request.header("x-forwarded-for", forwarded);
+    }
+    Ok(router
+        .clone()
+        .oneshot(request.body(Body::from(serde_json::to_vec(
+            &json!({"username":username,"password":password}),
+        )?))?)
+        .await?
+        .status())
+}
+
+#[tokio::test]
+async fn forwarded_login_limits_isolate_clients_and_reject_missing_transport() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    auth::bootstrap_admin(temp.path(), "owner", PASSWORD).map_err(|error| error.message)?;
+    let router =
+        app(
+            Auth::load_with_trusted_proxies(temp.path(), None, Some("192.0.2.10,192.0.2.11"))
+                .map_err(|error| error.message)?,
+        );
+    let proxy: SocketAddr = "192.0.2.10:1234".parse()?;
+    assert_eq!(
+        login_from(&router, None, Some("198.51.100.1"), "owner", PASSWORD).await?,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        login_from(&router, Some(proxy), None, "owner", PASSWORD).await?,
+        StatusCode::BAD_REQUEST
+    );
+    for attempt in 0..8 {
+        let spoofed = format!("203.0.113.{attempt},198.51.100.1,192.0.2.11");
+        assert_eq!(
+            login_from(&router, Some(proxy), Some(&spoofed), "owner", "incorrect").await?,
+            if attempt < 5 {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+    assert_eq!(
+        login_from(
+            &router,
+            Some(proxy),
+            Some("198.51.100.2,192.0.2.11"),
+            "owner",
+            PASSWORD
+        )
+        .await?,
+        StatusCode::OK
+    );
+    assert_eq!(
+        login_from(
+            &router,
+            Some(proxy),
+            Some("198.51.100.1,192.0.2.11"),
+            "missing",
+            PASSWORD
+        )
+        .await?,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn real_transport_flood_and_spoofed_headers_cannot_lock_out_other_clients() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let router = app(configured(temp.path(), None).map_err(|error| error.message)?);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+    });
+    let attacker = reqwest::Client::builder()
+        .no_proxy()
+        .local_address("127.0.0.2".parse::<std::net::IpAddr>()?)
+        .build()?;
+    let legitimate = reqwest::Client::builder()
+        .no_proxy()
+        .local_address("127.0.0.3".parse::<std::net::IpAddr>()?)
+        .build()?;
+    let endpoint = format!("http://{address}/api/auth/login");
+    for attempt in 0..65 {
+        let status = attacker
+            .post(&endpoint)
+            .header("X-Forwarded-For", format!("198.51.100.{attempt}"))
+            .json(&json!({"username":"owner", "password":"incorrect"}))
+            .send()
+            .await?
+            .status();
+        assert_eq!(
+            status,
+            if attempt < 5 {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+    assert_eq!(
+        legitimate
+            .post(&endpoint)
+            .json(&json!({"username":"owner","password":PASSWORD}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::OK
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn uppercase_zip_save_upload_passes_media_type_checks() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let router = app(configured(temp.path(), None).map_err(|error| error.message)?);
+    let cookie = sign_in(&router, "owner", PASSWORD).await?;
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/saves/World.ZIP")
+                .header(header::HOST, "localhost:9400")
+                .header(header::CONTENT_TYPE, "application/zip")
+                .header(header::COOKIE, cookie)
+                .body(Body::from("fixture"))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_account_identity_migration_is_atomic_and_stable() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    auth::bootstrap_admin(temp.path(), "owner", PASSWORD).map_err(|error| error.message)?;
+    let path = temp.path().join("panel-accounts.json");
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    legacy["accounts"][0]
+        .as_object_mut()
+        .ok_or("Missing fixture account")?
+        .remove("account_id");
+    factorio_control::storage::atomic_write(&path, &serde_json::to_vec(&legacy)?, true)
+        .map_err(|error| error.message)?;
+    let router = app(Auth::load(temp.path(), None).map_err(|error| error.message)?);
+    let cookie = sign_in(&router, "owner", PASSWORD).await?;
+    let status = local(
+        &router,
+        Method::GET,
+        "/api/auth/status",
+        Some(&cookie),
+        None,
+    )
+    .await?;
+    let id = status.body["user"]["account_id"]
+        .as_str()
+        .ok_or("Missing account identity")?;
+    assert_eq!(id.len(), 64);
+    let migrated: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    assert_eq!(migrated["accounts"][0]["account_id"], id);
+    assert!(migrated["accounts"][0]["password_hash"] == legacy["accounts"][0]["password_hash"]);
+    let stable_bytes = std::fs::read(&path)?;
+    let reloaded = app(Auth::load(temp.path(), None).map_err(|error| error.message)?);
+    let cookie = sign_in(&reloaded, "owner", PASSWORD).await?;
+    let status = local(
+        &reloaded,
+        Method::GET,
+        "/api/auth/status",
+        Some(&cookie),
+        None,
+    )
+    .await?;
+    assert_eq!(status.body["user"]["account_id"], id);
+    assert!(std::fs::read(&path)? == stable_bytes);
+    factorio_control::storage::atomic_write(&path, &serde_json::to_vec(&legacy)?, true)
+        .map_err(|error| error.message)?;
+    assert_eq!(
+        local(
+            &reloaded,
+            Method::GET,
+            "/api/auth/status",
+            Some(&cookie),
+            None
+        )
+        .await?
+        .status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_identity_survives_updates_and_changes_on_recreation() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let router = app(configured(temp.path(), None).map_err(|error| error.message)?);
+    let cookie = sign_in(&router, "owner", PASSWORD).await?;
+    let document = local(
+        &router,
+        Method::GET,
+        "/api/auth/accounts",
+        Some(&cookie),
+        None,
+    )
+    .await?;
+    let created = local(&router, Method::POST, "/api/auth/accounts/create", Some(&cookie), Some(json!({
+        "revision":document.body["revision"], "username":"player", "password":PASSWORD, "role":"viewer"
+    }))).await?;
+    assert_eq!(created.status, StatusCode::OK);
+    let identity = |body: &Value| -> Result<String, Box<dyn std::error::Error>> {
+        Ok(body["accounts"]
+            .as_array()
+            .ok_or("Missing fixture accounts")?
+            .iter()
+            .find(|account| account["username"] == "player")
+            .and_then(|account| account["account_id"].as_str())
+            .ok_or("Missing player identity")?
+            .to_owned())
+    };
+    let original = identity(&created.body)?;
+    let updated = local(&router, Method::POST, "/api/auth/accounts/update", Some(&cookie), Some(json!({
+        "revision":created.body["revision"], "username":"player", "password":"another-fixture-password", "role":"operator"
+    }))).await?;
+    assert_eq!(updated.status, StatusCode::OK);
+    assert_eq!(identity(&updated.body)?, original);
+    let deleted = local(
+        &router,
+        Method::POST,
+        "/api/auth/accounts/delete",
+        Some(&cookie),
+        Some(json!({
+            "revision":updated.body["revision"], "username":"player"
+        })),
+    )
+    .await?;
+    assert_eq!(deleted.status, StatusCode::OK);
+    let recreated = local(&router, Method::POST, "/api/auth/accounts/create", Some(&cookie), Some(json!({
+        "revision":deleted.body["revision"], "username":"player", "password":PASSWORD, "role":"operator"
+    }))).await?;
+    assert_eq!(recreated.status, StatusCode::OK);
+    assert_ne!(identity(&recreated.body)?, original);
     Ok(())
 }
