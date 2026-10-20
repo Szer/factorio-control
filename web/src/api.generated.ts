@@ -809,6 +809,7 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         Account: {
+            account_id: string;
             must_change_password: boolean;
             role: components["schemas"]["Role"];
             username: string;
@@ -928,6 +929,7 @@ export interface components {
             poll_interval_seconds: number;
             /** Format: int32 */
             ups_history_minutes: number;
+            use_server_whitelist?: boolean;
         };
         ManagerSettingsDocument: {
             revision: string;

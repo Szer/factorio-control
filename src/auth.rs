@@ -4,9 +4,9 @@ use argon2::{
     password_hash::SaltString,
 };
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, State},
+    extract::{ConnectInfo, DefaultBodyLimit, State},
     http::{HeaderMap, Method, Request, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -30,6 +30,10 @@ const SESSION_SECONDS: u64 = 8 * 60 * 60;
 const MAX_ACCOUNTS: usize = 100;
 const MAX_SESSIONS: usize = 1000;
 const MAX_RATE_KEYS: usize = 1024;
+const LOGIN_ATTEMPTS: u32 = 5;
+const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+const MAX_TRUSTED_PROXIES: usize = 64;
+const MAX_FORWARDED_HOPS: usize = 16;
 pub const BOOTSTRAP_FILE: &str = "bootstrap-admin.json";
 const INITIALIZED_FILE: &str = ".panel-auth-initialized";
 
@@ -43,6 +47,7 @@ pub enum Role {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct Account {
+    pub account_id: String,
     pub username: String,
     pub role: Role,
     pub must_change_password: bool,
@@ -92,6 +97,8 @@ pub struct PasswordChange {
 
 #[derive(Clone, Deserialize, Serialize)]
 struct StoredAccount {
+    #[serde(default)]
+    account_id: String,
     username: String,
     role: Role,
     password_hash: String,
@@ -113,6 +120,9 @@ struct Session {
     username: String,
     expires_at: u64,
 }
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ClientIp(IpAddr);
+
 struct Attempts {
     count: u32,
     started: Instant,
@@ -122,12 +132,14 @@ struct Runtime {
     accounts: Vec<StoredAccount>,
     sessions: HashMap<String, Session>,
     attempts: HashMap<String, Attempts>,
+    login_attempts: HashMap<ClientIp, Attempts>,
 }
 
 #[derive(Clone)]
 pub struct Auth {
     path: PathBuf,
     public_origin: Option<url::Url>,
+    trusted_proxies: Vec<IpAddr>,
     inner: Arc<Mutex<Runtime>>,
     password_slots: Arc<Semaphore>,
     dummy_hash: Arc<str>,
@@ -150,6 +162,7 @@ fn forbidden() -> Error {
 }
 fn public_account(account: &StoredAccount) -> Account {
     Account {
+        account_id: account.account_id.clone(),
         username: account.username.clone(),
         role: account.role,
         must_change_password: account.must_change_password,
@@ -237,9 +250,17 @@ fn read_accounts(path: &Path) -> Result<(String, Vec<StoredAccount>)> {
         ));
     }
     let mut names = std::collections::HashSet::new();
+    let mut identities = std::collections::HashSet::new();
     for account in &accounts {
         validate_username(&account.username)?;
         if !names.insert(account.username.clone())
+            || (!account.account_id.is_empty()
+                && (account.account_id.len() != 64
+                    || !account
+                        .account_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                    || !identities.insert(account.account_id.clone())))
             || !account.password_hash.starts_with("$argon2id$")
             || PasswordHash::new(&account.password_hash).is_err()
         {
@@ -250,6 +271,40 @@ fn read_accounts(path: &Path) -> Result<(String, Vec<StoredAccount>)> {
         }
     }
     Ok((revision, accounts))
+}
+
+fn new_account_id() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|_| Error::bad("Secure randomness is unavailable"))?;
+    Ok(hex(&bytes))
+}
+
+fn migrate_account_ids(path: &Path) -> Result<(String, Vec<StoredAccount>)> {
+    let (revision, mut accounts) = read_accounts(path)?;
+    if accounts
+        .iter()
+        .all(|account| !account.account_id.is_empty())
+    {
+        return Ok((revision, accounts));
+    }
+    for account in &mut accounts {
+        if account.account_id.is_empty() {
+            account.account_id = new_account_id()?;
+        }
+    }
+    if storage::read_document(path)?.0 != revision {
+        return Err(Error::conflict(
+            "Panel accounts changed during startup; restart the manager",
+        ));
+    }
+    storage::atomic_write(
+        path,
+        &serde_json::to_vec_pretty(&StoredAccounts { accounts })?,
+        true,
+    )?;
+    read_accounts(path)
 }
 
 fn mark_initialized(directory: &Path) -> Result<()> {
@@ -325,6 +380,7 @@ fn initialize_accounts(directory: &Path) -> Result<()> {
     mark_initialized(directory)?;
     let accounts = StoredAccounts {
         accounts: vec![StoredAccount {
+            account_id: new_account_id()?,
             username: credentials.username,
             role: Role::Admin,
             password_hash: hash_password(&credentials.password)?,
@@ -341,6 +397,15 @@ fn initialize_accounts(directory: &Path) -> Result<()> {
 
 impl Auth {
     pub fn load(directory: &Path, public_url: Option<&str>) -> Result<Self> {
+        Self::load_with_trusted_proxies(directory, public_url, None)
+    }
+
+    pub fn load_with_trusted_proxies(
+        directory: &Path,
+        public_url: Option<&str>,
+        trusted_proxies: Option<&str>,
+    ) -> Result<Self> {
+        let trusted_proxies = parse_trusted_proxies(trusted_proxies)?;
         storage::ensure_directory(directory)?;
         let public_origin = public_url.map(|value| {
             let url = url::Url::parse(value).map_err(|_| Error::bad("FC_PUBLIC_URL must be an HTTPS origin"))?;
@@ -351,7 +416,7 @@ impl Auth {
         }).transpose()?;
         initialize_accounts(directory)?;
         let path = directory.join("panel-accounts.json");
-        let (revision, accounts) = read_accounts(&path)?;
+        let (revision, accounts) = migrate_account_ids(&path)?;
         remove_bootstrap_file(directory, &accounts)?;
         let mut secret = [0u8; 32];
         OsRng.try_fill_bytes(&mut secret).map_err(|_| {
@@ -364,11 +429,13 @@ impl Auth {
         Ok(Self {
             path,
             public_origin,
+            trusted_proxies,
             inner: Arc::new(Mutex::new(Runtime {
                 revision,
                 accounts,
                 sessions: HashMap::new(),
                 attempts: HashMap::new(),
+                login_attempts: HashMap::new(),
             })),
             password_slots: Arc::new(Semaphore::new(2)),
             dummy_hash,
@@ -376,6 +443,11 @@ impl Auth {
     }
 
     pub async fn validate_bind(&self, bind: SocketAddr) -> Result<()> {
+        if self.public_origin.is_some() && self.trusted_proxies.is_empty() {
+            return Err(Error::bad(
+                "Public HTTPS deployments require explicit FC_TRUSTED_PROXIES; configure the actual reverse-proxy addresses and restrict ingress",
+            ));
+        }
         if !bind.ip().is_loopback() {
             let mut runtime = self.inner.lock().await;
             self.refresh(&mut runtime)?;
@@ -390,6 +462,12 @@ impl Auth {
 
     fn refresh(&self, runtime: &mut Runtime) -> Result<()> {
         let (revision, accounts) = read_accounts(&self.path)?;
+        if accounts.iter().any(|account| account.account_id.is_empty()) {
+            return Err(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Panel accounts require identity migration; restart the manager",
+            ));
+        }
         if revision != runtime.revision {
             if accounts.is_empty() && !runtime.accounts.is_empty() {
                 return Err(error(
@@ -436,6 +514,43 @@ impl Auth {
                 "Unable to create session cookie",
             )
         })
+    }
+
+    fn client_ip(&self, peer: Option<SocketAddr>, headers: &HeaderMap) -> Result<ClientIp> {
+        let peer = peer.ok_or_else(|| {
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Login connection information is unavailable",
+            )
+        })?;
+        let peer = normalized_ip(peer.ip());
+        if !self.trusted_proxies.contains(&peer) {
+            return Ok(ClientIp(peer));
+        }
+        let invalid = || Error::bad("Trusted proxy must send one valid X-Forwarded-For chain");
+        let mut values = headers.get_all("x-forwarded-for").iter();
+        let value = values.next().ok_or_else(invalid)?;
+        if values.next().is_some() || value.len() > MAX_FORWARDED_HOPS * 46 {
+            return Err(invalid());
+        }
+        let chain = value.to_str().map_err(|_| invalid())?;
+        let mut addresses = Vec::new();
+        for part in chain.split(',') {
+            if addresses.len() >= MAX_FORWARDED_HOPS {
+                return Err(invalid());
+            }
+            let address = part.trim().parse::<IpAddr>().map_err(|_| invalid())?;
+            addresses.push(normalized_ip(address));
+        }
+        // Only proxies nearest the verified transport peer may extend the trust chain.
+        addresses
+            .iter()
+            .rev()
+            .copied()
+            .find(|address| !self.trusted_proxies.contains(address))
+            .or_else(|| addresses.first().copied())
+            .map(ClientIp)
+            .ok_or_else(invalid)
     }
 
     fn check_request(&self, request: &Request<Body>) -> Result<()> {
@@ -500,10 +615,9 @@ impl Auth {
                 Method::POST | Method::PUT | Method::PATCH
             ) {
                 let path = request.uri().path();
-                let upload = path
-                    .strip_prefix("/api/saves/")
-                    .is_some_and(|name| name.ends_with(".zip") && !name.contains('/'))
-                    || path == "/api/mods/upload";
+                let upload = path.strip_prefix("/api/saves/").is_some_and(|name| {
+                    name.to_ascii_lowercase().ends_with(".zip") && !name.contains('/')
+                }) || path == "/api/mods/upload";
                 let expected = if upload && request.method() == Method::POST {
                     "application/zip"
                 } else if path == "/api/mods/settings/file" && request.method() == Method::POST {
@@ -527,6 +641,34 @@ impl Auth {
         }
         Ok(())
     }
+}
+
+fn normalized_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        ip => ip,
+    }
+}
+
+fn parse_trusted_proxies(value: Option<&str>) -> Result<Vec<IpAddr>> {
+    let mut proxies = Vec::new();
+    if let Some(value) = value {
+        for value in value.split(',') {
+            if proxies.len() >= MAX_TRUSTED_PROXIES {
+                return Err(Error::bad(
+                    "FC_TRUSTED_PROXIES allows at most 64 exact IP addresses",
+                ));
+            }
+            let ip = value.trim().parse::<IpAddr>().map_err(|_| {
+                Error::bad("FC_TRUSTED_PROXIES must contain comma-separated exact IP addresses")
+            })?;
+            proxies.push(normalized_ip(ip));
+        }
+    }
+    Ok(proxies)
 }
 
 fn accounts_document(runtime: &Runtime) -> AccountsDocument {
@@ -712,22 +854,49 @@ fn rate_limit(runtime: &mut Runtime, key: &str, limit: u32, duration: Duration) 
     Ok(())
 }
 
+fn limit_login(runtime: &mut Runtime, client: ClientIp) -> Result<()> {
+    runtime
+        .login_attempts
+        .retain(|_, attempt| attempt.started.elapsed() < LOGIN_WINDOW);
+    if !runtime.login_attempts.contains_key(&client)
+        && runtime.login_attempts.len() >= MAX_RATE_KEYS
+    {
+        // A full cache must not become a lockout shared by every new client.
+        if let Some(oldest) = runtime
+            .login_attempts
+            .iter()
+            .min_by_key(|(_, attempt)| attempt.started)
+            .map(|(ip, _)| *ip)
+        {
+            runtime.login_attempts.remove(&oldest);
+        }
+    }
+    let attempt = runtime.login_attempts.entry(client).or_insert(Attempts {
+        count: 0,
+        started: Instant::now(),
+    });
+    if attempt.count >= LOGIN_ATTEMPTS {
+        return Err(error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many login attempts; try again later",
+        ));
+    }
+    attempt.count += 1;
+    Ok(())
+}
+
 #[utoipa::path(post, path="/api/auth/login", request_body=LoginRequest, responses((status=200, body=SessionStatus), (status=401), (status=429)))]
 pub async fn login(
     State(auth): State<Auth>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Json(input): Json<LoginRequest>,
 ) -> Result<Response> {
+    let client = auth.client_ip(peer.map(|Extension(ConnectInfo(peer))| peer), &headers)?;
     let hash = {
         let mut runtime = auth.inner.lock().await;
         auth.refresh(&mut runtime)?;
-        rate_limit(&mut runtime, "global", 60, Duration::from_secs(60))?;
-        rate_limit(
-            &mut runtime,
-            &format!("account:{}", input.username),
-            5,
-            Duration::from_secs(900),
-        )?;
+        limit_login(&mut runtime, client)?;
         if validate_username(&input.username).is_err() || input.password.len() > 1024 {
             return Err(error(
                 StatusCode::UNAUTHORIZED,
@@ -783,9 +952,6 @@ pub async fn login(
             expires_at,
         },
     );
-    runtime
-        .attempts
-        .remove(&format!("account:{}", account.username));
     let mut response = Json(SessionStatus {
         user: Some(account),
         expires_at: Some(expires_at),
@@ -891,6 +1057,7 @@ pub async fn create_account(
     }
     let mut accounts = runtime.accounts.clone();
     accounts.push(StoredAccount {
+        account_id: new_account_id()?,
         username: input.username,
         role: input.role,
         password_hash,
@@ -1061,6 +1228,7 @@ pub fn bootstrap_admin(directory: &Path, username: &str, password: &str) -> Resu
     }
     let accounts = StoredAccounts {
         accounts: vec![StoredAccount {
+            account_id: new_account_id()?,
             username: username.into(),
             role: Role::Admin,
             password_hash: hash_password(password)?,
@@ -1101,6 +1269,153 @@ pub struct Api;
 mod tests {
     use super::*;
 
+    fn runtime() -> Runtime {
+        Runtime {
+            revision: String::new(),
+            accounts: Vec::new(),
+            sessions: HashMap::new(),
+            attempts: HashMap::new(),
+            login_attempts: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn login_limit_is_per_client_bounded_and_expires()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut runtime = runtime();
+        let attacker = ClientIp("192.0.2.1".parse()?);
+        let legitimate = ClientIp("192.0.2.2".parse()?);
+        for _ in 0..LOGIN_ATTEMPTS {
+            limit_login(&mut runtime, attacker).map_err(|error| error.message)?;
+        }
+        assert_eq!(
+            limit_login(&mut runtime, attacker)
+                .err()
+                .map(|error| error.status),
+            Some(StatusCode::TOO_MANY_REQUESTS)
+        );
+        limit_login(&mut runtime, legitimate).map_err(|error| error.message)?;
+        if let Some(attempt) = runtime.login_attempts.get_mut(&attacker) {
+            attempt.started = Instant::now() - LOGIN_WINDOW;
+        }
+        limit_login(&mut runtime, attacker).map_err(|error| error.message)?;
+        assert_eq!(
+            runtime
+                .login_attempts
+                .get(&attacker)
+                .map(|attempt| attempt.count),
+            Some(1)
+        );
+        for address in 0..MAX_RATE_KEYS + 100 {
+            let address = IpAddr::V6(std::net::Ipv6Addr::from(
+                address as u128 + 0x20010000000000000000000000000000,
+            ));
+            limit_login(&mut runtime, ClientIp(address)).map_err(|error| error.message)?;
+            assert!(runtime.login_attempts.len() <= MAX_RATE_KEYS);
+        }
+        limit_login(&mut runtime, legitimate).map_err(|error| error.message)?;
+        assert_eq!(runtime.login_attempts.len(), MAX_RATE_KEYS);
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_proxy_configuration_is_explicit_and_validated()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        assert!(
+            parse_trusted_proxies(None)
+                .map_err(|error| error.message)?
+                .is_empty()
+        );
+        let proxies = parse_trusted_proxies(Some(" 192.0.2.1, ::ffff:192.0.2.2, ::1 "))
+            .map_err(|error| error.message)?;
+        assert_eq!(
+            proxies,
+            vec![
+                "192.0.2.1".parse::<IpAddr>()?,
+                "192.0.2.2".parse()?,
+                "::1".parse()?
+            ]
+        );
+        for invalid in [
+            "",
+            " ",
+            "proxy.example",
+            "192.0.2.1/24",
+            "192.0.2.1,",
+            "0.0.0.0:8080",
+        ] {
+            assert!(parse_trusted_proxies(Some(invalid)).is_err());
+        }
+        let too_many = vec!["192.0.2.1"; MAX_TRUSTED_PROXIES + 1].join(",");
+        assert!(parse_trusted_proxies(Some(&too_many)).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forwarded_client_identity_uses_only_verified_proxy_chain()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let auth =
+            Auth::load_with_trusted_proxies(directory.path(), None, Some("192.0.2.10,192.0.2.11"))
+                .map_err(|error| error.message)?;
+        let mut headers = HeaderMap::new();
+        let direct = Some("198.51.100.1:1234".parse()?);
+        let proxy = Some("192.0.2.10:1234".parse()?);
+        assert!(auth.client_ip(None, &headers).is_err());
+        assert!(auth.client_ip(proxy, &headers).is_err());
+        headers.insert("x-forwarded-for", "not an address".parse()?);
+        assert_eq!(
+            auth.client_ip(direct, &headers)
+                .map_err(|error| error.message)?,
+            ClientIp("198.51.100.1".parse::<IpAddr>()?)
+        );
+        assert!(auth.client_ip(proxy, &headers).is_err());
+        for chain in [
+            "203.0.113.2, 198.51.100.1, 192.0.2.11",
+            "198.51.100.1",
+            "::ffff:198.51.100.1, ::ffff:192.0.2.11",
+        ] {
+            headers.insert("x-forwarded-for", chain.parse()?);
+            assert_eq!(
+                auth.client_ip(proxy, &headers)
+                    .map_err(|error| error.message)?,
+                ClientIp("198.51.100.1".parse::<IpAddr>()?)
+            );
+        }
+        assert_eq!(
+            auth.client_ip(Some("[::ffff:198.51.100.1]:1234".parse()?), &headers)
+                .map_err(|error| error.message)?,
+            ClientIp("198.51.100.1".parse::<IpAddr>()?)
+        );
+        for malformed in [
+            "",
+            ",",
+            "198.51.100.1,",
+            "unknown",
+            "198.51.100.1:1234",
+            "[2001:db8::1]",
+        ] {
+            headers.insert("x-forwarded-for", malformed.parse()?);
+            assert!(auth.client_ip(proxy, &headers).is_err());
+        }
+        headers.insert(
+            "x-forwarded-for",
+            vec!["198.51.100.1"; MAX_FORWARDED_HOPS + 1]
+                .join(",")
+                .parse()?,
+        );
+        assert!(auth.client_ip(proxy, &headers).is_err());
+        headers.insert(
+            "x-forwarded-for",
+            "x".repeat(MAX_FORWARDED_HOPS * 46 + 1).parse()?,
+        );
+        assert!(auth.client_ip(proxy, &headers).is_err());
+        headers.insert("x-forwarded-for", "198.51.100.1".parse()?);
+        headers.append("x-forwarded-for", "203.0.113.1".parse()?);
+        assert!(auth.client_ip(proxy, &headers).is_err());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn canceled_password_requests_hold_capacity_until_blocking_work_finishes()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -1135,6 +1450,7 @@ mod tests {
         let mut runtime = Runtime {
             revision: "fixture".into(),
             accounts: vec![StoredAccount {
+                account_id: "a".repeat(64),
                 username: "owner".into(),
                 role: Role::Admin,
                 password_hash: String::new(),
@@ -1148,6 +1464,7 @@ mod tests {
                 },
             )]),
             attempts: HashMap::new(),
+            login_attempts: HashMap::new(),
         };
         let mut headers = HeaderMap::new();
         let cookie = format!("{COOKIE}={token}").parse();

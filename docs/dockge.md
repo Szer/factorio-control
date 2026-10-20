@@ -1,8 +1,17 @@
 # Dockge deployment
 
-Use the repository's `compose.yaml` as the stack definition. Set `FC_PUBLIC_URL` in Dockge's environment editor to the exact public HTTPS origin, without a trailing path. Set `CONTROL_IMAGE` to a published digest for a pinned deployment.
+Use the repository's `compose.yaml` as the stack definition. Set `FC_PUBLIC_URL` to the exact public HTTPS origin and `FC_TRUSTED_PROXIES` to the actual proxy IPs in Dockge's environment editor. Set `CONTROL_IMAGE` to a published digest for a pinned deployment.
 
 The image serves HTTP on container port 8080. The existing reverse proxy can keep using host port 8181 and must preserve the public Host header. Host HTTP binds to 127.0.0.1 unless `CONTROL_LISTEN_ADDRESS` is set. A container or remote proxy needs an address it can reach; allow that proxy through the host firewall. TLS terminates at the proxy. Do not publish RCON.
+
+
+## Proxy client addresses
+
+Set `FC_TRUSTED_PROXIES` in Dockge to the exact comma-separated proxy IPs that connect to Control. The proxy must preserve Host and replace or append the actual client IP in one `X-Forwarded-For` header. Restrict port 8181 to those proxies; a trusted Docker gateway must not also represent untrusted direct traffic.
+
+The setting accepts up to 64 IPv4/IPv6 addresses, with no CIDR ranges. Public HTTPS deployment requires this setting and refuses startup when it is empty. Local operation without a public URL can leave it empty and ignores forwarding headers. Clients sharing NAT share the five-attempts-per-minute login bucket; identify the real proxy network before public deployment instead of guessing an address.
+
+The forwarded chain is bounded and evaluated from the trusted connection toward the client. Untrusted peers cannot choose their rate-limit identity by sending a header. Incorrectly configured trusted proxies fail login rather than trusting a fabricated address.
 
 The game listens on container UDP 34197. `FACTORIO_PORT` changes the host port mapping; retain the game's internal port at 34197 unless the Compose mapping is also changed. A stopped or paused game does not make the manager unhealthy.
 
@@ -29,7 +38,7 @@ For a filesystem copy, stop both game servers and back up the original data firs
 
 Retain existing destination panel accounts and manager settings. Do not copy FSM's manager database or `config.ini`; Control creates its own runtime paths. Give the copied destination files to UID/GID 10001 and restrict the data directory to its owner. Never change ownership or permissions of FSM's original directories for Control.
 
-Start Control, select the imported save, inspect settings and mods, then start the game. Switch the reverse proxy to Control after verification. Two servers cannot use the same host UDP port or safely write to the same world and mods directories.
+Start Control, select the imported save, and inspect settings and mods. If FSM used a whitelist, enable **Settings → Manager settings → Enable server whitelist** before starting. A nonempty imported whitelist without an explicit manager choice blocks startup; disabling it also requires saving that explicit choice. Whitelist and banlist paths are passed directly to Factorio. Switch the reverse proxy to Control after verification. Two servers cannot use the same host UDP port or safely write to the same world and mods directories.
 
 ## Upgrade and rollback
 

@@ -32,6 +32,10 @@ pub async fn authenticated(
                     Request::builder()
                         .method("POST")
                         .uri("/api/auth/login")
+                        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                            [127, 0, 0, 1],
+                            12345,
+                        ))))
                         .header("Host", "localhost:9400")
                         .header("Content-Type", "application/json")
                         .body(Body::from(serde_json::to_vec(
