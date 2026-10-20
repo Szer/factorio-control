@@ -256,6 +256,10 @@ function ServerForm({ initial }: { initial: RawSettingsDocument }) {
       }),
   });
   const busy = save.isPending || reload.isPending;
+  if (initial.revision !== baseline.revision && !dirty && !busy) {
+    setBaseline(initial);
+    setText(JSON.stringify(initial.settings, null, 2));
+  }
   let draft: Record<string, unknown> = {};
   let parseError = false;
   try {
@@ -491,7 +495,8 @@ function ServerForm({ initial }: { initial: RawSettingsDocument }) {
         dirty={dirty}
         busy={busy}
         discard={() => {
-          setText(JSON.stringify(baseline.settings, null, 2));
+          setBaseline(initial);
+          setText(JSON.stringify(initial.settings, null, 2));
           save.reset();
           setValidation(null);
         }}
@@ -562,6 +567,10 @@ function ManagerForm({ initial }: { initial: ManagerDocument }) {
       }),
   });
   const busy = save.isPending || reload.isPending;
+  if (initial.revision !== baseline.revision && !dirty && !busy) {
+    setBaseline(initial);
+    setDraft(initial.settings);
+  }
   return (
     <form
       onSubmit={(event) => {
@@ -770,7 +779,8 @@ function ManagerForm({ initial }: { initial: ManagerDocument }) {
         dirty={dirty}
         busy={busy}
         discard={() => {
-          setDraft(baseline.settings);
+          setBaseline(initial);
+          setDraft(initial.settings);
           save.reset();
           setValidation(null);
         }}

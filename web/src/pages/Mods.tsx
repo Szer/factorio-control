@@ -821,7 +821,6 @@ function StartupEditor({
 }) {
   const [baseline, setBaseline] = useState(initial);
   const [draft, setDraft] = useState(initial.settings);
-  const [seenRevision, setSeenRevision] = useState(initial.revision);
   const fileInput = useRef<HTMLInputElement>(null);
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline.settings);
   useUnsavedChanges(dirty);
@@ -854,12 +853,9 @@ function StartupEditor({
       }),
   });
   const busy = save.isPending || upload.isPending || reload.isPending;
-  if (initial.revision !== seenRevision) {
-    setSeenRevision(initial.revision);
-    if (!dirty && !busy) {
-      setBaseline(initial);
-      setDraft(initial.settings);
-    }
+  if (initial.revision !== baseline.revision && !dirty && !busy) {
+    setBaseline(initial);
+    setDraft(initial.settings);
   }
   function change(name: string, value: string) {
     setDraft((previous) =>
@@ -1089,7 +1085,6 @@ function StartupEditor({
             disabled={!dirty || busy}
             onClick={() => {
               setBaseline(initial);
-              setSeenRevision(initial.revision);
               setDraft(initial.settings);
               save.reset();
             }}

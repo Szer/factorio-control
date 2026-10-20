@@ -6,6 +6,7 @@ import {
   screen,
   waitFor,
   within,
+  act,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -65,11 +66,14 @@ function mount(element: ReactElement) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
-    <QueryClientProvider client={client}>
-      <TestAccess>{element}</TestAccess>
-    </QueryClientProvider>,
-  );
+  return {
+    client,
+    ...render(
+      <QueryClientProvider client={client}>
+        <TestAccess>{element}</TestAccess>
+      </QueryClientProvider>,
+    ),
+  };
 }
 beforeEach(() => {
   vi.spyOn(authApi, "status").mockResolvedValue({
@@ -689,3 +693,143 @@ it("shows server-reported sync progress and the current mod while downloads run"
   await screen.findByText(/Mods synced/);
   expect(screen.queryByRole("dialog")).toBeNull();
 });
+
+it.each(["server", "manager", "admins"] as const)(
+  "adopts clean %s refreshes, preserves dirty edits, and discards to the latest revision",
+  async (kind) => {
+    let currentSettings = structuredClone(settings);
+    let currentManager = {
+      revision: "one",
+      settings: {
+        poll_interval_seconds: 2,
+        ups_history_minutes: 10,
+        enable_script_telemetry: false,
+        game_bind_address: "0.0.0.0",
+        game_port: 34197,
+        use_server_whitelist: false,
+      },
+    };
+    let currentAdmins = { revision: "one", admins: ["owner"] };
+    vi.spyOn(api, "rawSettings").mockImplementation(() =>
+      Promise.resolve(currentSettings),
+    );
+    vi.spyOn(api, "manager").mockImplementation(() =>
+      Promise.resolve(currentManager),
+    );
+    vi.spyOn(api, "admins").mockImplementation(() =>
+      Promise.resolve(currentAdmins),
+    );
+    vi.spyOn(authApi, "accounts").mockResolvedValue({
+      revision: "one",
+      accounts: [],
+    });
+    const saveSettings = vi
+      .spyOn(api, "saveRawSettings")
+      .mockImplementation((value) =>
+        Promise.resolve({ ...value, revision: "saved" }),
+      );
+    const saveManager = vi
+      .spyOn(api, "saveManager")
+      .mockImplementation((value) =>
+        Promise.resolve({ ...value, revision: "saved" }),
+      );
+    const saveAdmins = vi
+      .spyOn(api, "saveAdmins")
+      .mockImplementation((value) =>
+        Promise.resolve({ ...value, revision: "saved" }),
+      );
+    const { client } = mount(<SettingsPage />);
+    await screen.findByRole("textbox", { name: "Server name" });
+    const user = userEvent.setup();
+    if (kind !== "server")
+      await user.click(
+        screen.getByRole("button", {
+          name: kind === "manager" ? "Manager settings" : "Administrators",
+        }),
+      );
+    const queryKey = kind === "server" ? "raw-settings" : kind;
+    async function external(revision: string, value: string) {
+      if (kind === "server")
+        currentSettings = {
+          ...currentSettings,
+          revision,
+          settings: { ...currentSettings.settings, name: value },
+        };
+      else if (kind === "manager")
+        currentManager = {
+          ...currentManager,
+          revision,
+          settings: {
+            ...currentManager.settings,
+            poll_interval_seconds: Number(value),
+          },
+        };
+      else currentAdmins = { revision, admins: [value] };
+      await act(async () => {
+        await client.refetchQueries({ queryKey: [queryKey] });
+      });
+    }
+    const input = () =>
+      screen.getByRole(kind === "server" ? "textbox" : "spinbutton", {
+        name: kind === "server" ? "Server name" : /^Refresh interval/u,
+      });
+    const first = kind === "manager" ? "7" : "External";
+    const latest = kind === "manager" ? "11" : "Latest";
+    await external("two", first);
+    await waitFor(() => {
+      if (kind === "admins")
+        expect(
+          screen.getByRole("button", { name: "Remove External" }),
+        ).toBeTruthy();
+      else expect(input()).toHaveProperty("value", first);
+    });
+    if (kind === "admins") {
+      await user.type(
+        screen.getByRole("textbox", { name: "Factorio username" }),
+        "Draft",
+      );
+      await user.click(screen.getByRole("button", { name: "Add player" }));
+    } else {
+      await user.clear(input());
+      await user.type(input(), kind === "manager" ? "13" : "Draft");
+    }
+    await external("three", latest);
+    if (kind === "admins")
+      expect(screen.getByRole("button", { name: "Remove Draft" })).toBeTruthy();
+    else
+      expect(input()).toHaveProperty(
+        "value",
+        kind === "manager" ? "13" : "Draft",
+      );
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    if (kind === "admins") {
+      expect(
+        screen.getByRole("button", { name: "Remove Latest" }),
+      ).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Remove Draft" })).toBeNull();
+      await user.type(
+        screen.getByRole("textbox", { name: "Factorio username" }),
+        "AfterDiscard",
+      );
+      await user.click(screen.getByRole("button", { name: "Add player" }));
+    } else {
+      expect(input()).toHaveProperty("value", latest);
+      await user.clear(input());
+      await user.type(input(), kind === "manager" ? "19" : "After discard");
+    }
+    await user.click(
+      screen.getByRole("button", {
+        name: kind === "admins" ? "Save administrators" : "Save changes",
+      }),
+    );
+    await waitFor(() => {
+      const call =
+        kind === "server"
+          ? saveSettings.mock.calls[0]?.[0]
+          : kind === "manager"
+            ? saveManager.mock.calls[0]?.[0]
+            : saveAdmins.mock.calls[0]?.[0];
+      expect(call).toMatchObject({ revision: "three" });
+    });
+  },
+);

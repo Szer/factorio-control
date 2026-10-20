@@ -77,6 +77,10 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
   const dirty = text !== JSON.stringify(baseline.admins, null, 2);
   const busy = mutation.isPending || reload.isPending;
   useUnsavedChanges(dirty);
+  if (initial.revision !== baseline.revision && !dirty && !busy) {
+    setBaseline(initial);
+    setAdmins(initial.admins);
+  }
   return (
     <>
       <div className="toolbar">
@@ -221,7 +225,8 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
             className="button secondary"
             disabled={!dirty || busy}
             onClick={() => {
-              setAdmins(baseline.admins);
+              setBaseline(initial);
+              setAdmins(initial.admins);
               mutation.reset();
               setValidation(null);
             }}
