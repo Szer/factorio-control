@@ -79,12 +79,17 @@ const groups: { title: string; fields: Field[] }[] = [
   {
     title: "Factorio account",
     fields: [
-      { key: "username", label: "Factorio username", kind: "text" },
+      {
+        key: "username",
+        label: "Factorio username",
+        kind: "text",
+        help: "Your Factorio.com account username. Mod downloads require both username and token.",
+      },
       {
         key: "token",
         label: "Factorio token",
         kind: "password",
-        help: "Used for public server registration and authenticated mod downloads.",
+        help: "Your Factorio.com account token, used with the username for public game registration and mod downloads. This is not a control-panel login token.",
       },
       {
         key: "password",

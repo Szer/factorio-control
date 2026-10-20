@@ -350,7 +350,7 @@ fn read_list(path: &FsPath) -> Result<(ModList, String)> {
     }
     Ok((list, revision))
 }
-fn credentials(app: &App) -> Result<Option<(String, String)>> {
+fn account_credentials(app: &App) -> Result<(String, String)> {
     let username = std::env::var("FACTORIO_USERNAME")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -358,24 +358,46 @@ fn credentials(app: &App) -> Result<Option<(String, String)>> {
         .ok()
         .filter(|value| !value.trim().is_empty());
     if let (Some(username), Some(token)) = (username, token) {
-        return Ok(Some((username, token)));
+        return Ok((username, token));
     }
     let (_, bytes) = storage::read_document(&app.settings_path())?;
     let config: serde_json::Value = match bytes {
         Some(bytes) => serde_json::from_slice(&bytes)?,
-        None => return Ok(None),
+        None => return Ok((String::new(), String::new())),
     };
-    match (
-        config.get("username").and_then(serde_json::Value::as_str),
-        config.get("token").and_then(serde_json::Value::as_str),
-    ) {
-        (Some(username), Some(token))
-            if !username.trim().is_empty() && !token.trim().is_empty() =>
-        {
-            Ok(Some((username.into(), token.into())))
-        }
-        _ => Ok(None),
-    }
+    Ok((
+        config
+            .get("username")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .into(),
+        config
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .into(),
+    ))
+}
+fn credentials(app: &App) -> Result<Option<(String, String)>> {
+    let (username, token) = account_credentials(app)?;
+    Ok((!username.trim().is_empty() && !token.trim().is_empty()).then_some((username, token)))
+}
+fn credential_requirement(app: &App) -> Result<&'static str> {
+    let (username, token) = account_credentials(app)?;
+    Ok(
+        match (username.trim().is_empty(), token.trim().is_empty()) {
+            (true, false) => {
+                "Your token is saved. Add your Factorio.com username in Server settings to enable mod downloads."
+            }
+            (false, true) => {
+                "Your username is saved. Add your Factorio.com token in Server settings to enable mod downloads."
+            }
+            (true, true) => {
+                "Add your Factorio.com username and token in Server settings, or upload the required ZIPs first."
+            }
+            (false, false) => "Credentials are configured. Refresh the sync plan to use them.",
+        },
+    )
 }
 pub fn list(app: &App) -> Result<ModsDocument> {
     let path = directory(app)?;

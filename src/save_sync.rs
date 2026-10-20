@@ -138,7 +138,15 @@ fn build_plan(
         .filter(|item| matches!(item.action, SyncAction::Download))
         .count();
     if downloads > 0 && !current.portal_authenticated {
-        blockers.push(format!("{downloads} {} downloads. Configure Factorio username/token in Server settings, or upload the required ZIPs first.", if downloads == 1 { "mod requires" } else { "mods require" }));
+        blockers.push(format!(
+            "{downloads} {} downloads. {}",
+            if downloads == 1 {
+                "mod requires"
+            } else {
+                "mods require"
+            },
+            credential_requirement(app)?
+        ));
     }
     let mut disable = HashSet::new();
     for item in current.mods.iter().filter(|item| item.enabled) {
@@ -533,6 +541,26 @@ mod tests {
             })
         ));
         assert!(!directory(&app).map_err(err)?.join("mod-list.json").exists());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn credential_warning_identifies_missing_field_and_clears_after_save() -> TestResult {
+        let (_temp, app) = setup().await?;
+        save(&app, &[("missing", [1, 0, 0])])?;
+        fs::write(app.settings_path(), br#"{"token":"fixture-token"}"#)?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        assert_eq!(plan.blockers.len(), 1);
+        assert!(plan.blockers[0].contains("Your token is saved. Add your Factorio.com username"));
+        assert!(!plan.blockers[0].contains("fixture-token"));
+        fs::write(app.settings_path(), br#"{"username":"fixture-user"}"#)?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        assert!(plan.blockers[0].contains("Your username is saved. Add your Factorio.com token"));
+        fs::write(
+            app.settings_path(),
+            br#"{"username":"fixture-user","token":"fixture-token"}"#,
+        )?;
+        let (plan, _, _) = build_plan(&app, "world.zip", "2.1.23").map_err(err)?;
+        assert!(plan.blockers.is_empty());
         Ok(())
     }
     #[tokio::test]
