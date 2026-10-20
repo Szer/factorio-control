@@ -1,7 +1,8 @@
+import { useSessionMutation } from "../useSessionMutation";
 import { useState } from "react";
 import { useUnsavedChanges } from "../useUnsavedChanges";
 import type { SyntheticEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   LoaderCircle,
   Plus,
@@ -31,23 +32,24 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
   }
   const [name, setName] = useState("");
   const [validation, setValidation] = useState<string | null>(null);
-  const client = useQueryClient();
-  const mutation = useMutation({
+  const mutation = useSessionMutation({
     mutationFn: api.saveAdmins,
-    onSuccess: (result) => {
-      setBaseline(result);
-      setAdmins(result.admins);
-      client.setQueryData(["admins"], result);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["admins"], result, () => {
+        setBaseline(result);
+        setAdmins(result.admins);
+      });
     },
   });
-  const reload = useMutation({
+  const reload = useSessionMutation({
     mutationFn: api.admins,
-    onSuccess: (result) => {
-      setBaseline(result);
-      setAdmins(result.admins);
-      mutation.reset();
-      setValidation(null);
-      client.setQueryData(["admins"], result);
+    onSuccess: async (result, _variables, session) => {
+      await session.publish(["admins"], result, () => {
+        setBaseline(result);
+        setAdmins(result.admins);
+        mutation.reset();
+        setValidation(null);
+      });
     },
   });
   function add(event: SyntheticEvent<HTMLFormElement>) {
@@ -75,6 +77,10 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
   const dirty = text !== JSON.stringify(baseline.admins, null, 2);
   const busy = mutation.isPending || reload.isPending;
   useUnsavedChanges(dirty);
+  if (initial.revision !== baseline.revision && !dirty && !busy) {
+    setBaseline(initial);
+    setAdmins(initial.admins);
+  }
   return (
     <>
       <div className="toolbar">
@@ -145,8 +151,8 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
               </EmptyState>
             ) : (
               <ul className="admin-list">
-                {admins.map((admin) => (
-                  <li key={admin}>
+                {admins.map((admin, index) => (
+                  <li key={`${admin}:${String(index)}`}>
                     <span className="player-avatar">
                       <UserRound size={19} />
                     </span>
@@ -158,7 +164,9 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
                       aria-label={`Remove ${admin}`}
                       disabled={mutation.isPending || reload.isPending}
                       onClick={() => {
-                        setAdmins(admins.filter((value) => value !== admin));
+                        setAdmins(
+                          admins.filter((_, position) => position !== index),
+                        );
                         mutation.reset();
                       }}
                     >
@@ -217,7 +225,8 @@ function AdminsForm({ initial }: { initial: AdminsDocument }) {
             className="button secondary"
             disabled={!dirty || busy}
             onClick={() => {
-              setAdmins(baseline.admins);
+              setBaseline(initial);
+              setAdmins(initial.admins);
               mutation.reset();
               setValidation(null);
             }}

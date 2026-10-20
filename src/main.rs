@@ -71,8 +71,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let public_url = std::env::var("FC_PUBLIC_URL").ok();
-    let authentication =
-        auth::Auth::load(&app.directory, public_url.as_deref()).map_err(|error| error.message)?;
+    let trusted_proxies = std::env::var_os("FC_TRUSTED_PROXIES")
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| "FC_TRUSTED_PROXIES must contain UTF-8 IP addresses")
+        })
+        .transpose()?;
+    let authentication = auth::Auth::load_with_trusted_proxies(
+        &app.directory,
+        public_url.as_deref(),
+        trusted_proxies
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+    )
+    .map_err(|error| error.message)?;
     authentication
         .validate_bind(bind)
         .await
@@ -110,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("Factorio Control listening on http://{bind}");
     let shutdown_app = app.clone();
-    let result = axum::serve(listener, api::router_with_auth(app.clone(), std::path::Path::new("web/dist"), authentication))
+    let result = axum::serve(listener, api::router_with_auth(app.clone(), std::path::Path::new("web/dist"), authentication).into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             let mut terminate = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(signal) => signal,
