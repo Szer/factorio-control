@@ -1,4 +1,5 @@
 use super::*;
+use crate::hex;
 use axum::extract::Query;
 use std::io::Write;
 
@@ -384,8 +385,19 @@ fn validate_selection(
 }
 fn hash_file(path: &FsPath) -> Result<String> {
     let mut hash = Sha256::new();
-    std::io::copy(&mut fs::File::open(path)?, &mut hash)?;
-    Ok(format!("{:x}", hash.finalize()))
+    let mut source = fs::File::open(path)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = match source.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    Ok(hex(&hash.finalize()))
 }
 pub(super) fn archive_info(path: &FsPath) -> Result<(ModInfo, u64)> {
     storage::ensure_regular(path)?;
@@ -452,7 +464,7 @@ fn selection(app: &App, requested: &ModList) -> Result<(ModList, Vec<InstalledMo
 #[cfg(test)]
 fn verify_download(name: &str, release: &Release, bytes: &[u8]) -> Result<ModInfo> {
     if release.sha1.len() != 40
-        || release.sha1.to_ascii_lowercase() != format!("{:x}", sha1::Sha1::digest(bytes))
+        || release.sha1.to_ascii_lowercase() != hex(&sha1::Sha1::digest(bytes))
     {
         return Err(Error::bad(
             "Downloaded mod checksum does not match the portal",
@@ -526,9 +538,7 @@ pub(super) async fn download_response(
         file.write_all(&chunk).await?;
     }
     file.sync_all().await?;
-    if release.sha1.len() != 40
-        || release.sha1.to_ascii_lowercase() != format!("{:x}", hash.finalize())
-    {
+    if release.sha1.len() != 40 || release.sha1.to_ascii_lowercase() != hex(&hash.finalize()) {
         return Err(Error::bad(
             "Downloaded mod checksum does not match the portal",
         ));
@@ -981,7 +991,7 @@ fn read_pack(app: &App, name: &str) -> Result<(Pack, String)> {
     }
     Ok((
         serde_json::from_slice(&bytes)?,
-        format!("{:x}", Sha256::digest(&bytes)),
+        hex(&Sha256::digest(&bytes)),
     ))
 }
 fn expected_pack(app: &App, name: &str, expected: &str) -> Result<Pack> {
@@ -1377,10 +1387,10 @@ mod tests {
             },
         };
         assert!(verify_download("alpha", &release, &bytes).is_err());
-        release.sha1 = format!("{:x}", sha1::Sha1::digest(&bytes));
+        release.sha1 = hex(&sha1::Sha1::digest(&bytes));
         assert!(verify_download("other", &release, &bytes).is_err());
         assert!(verify_download("alpha", &release, &bytes).is_ok());
-        release.sha1 = format!("{:x}", sha1::Sha1::digest(b"not a zip"));
+        release.sha1 = hex(&sha1::Sha1::digest(b"not a zip"));
         assert!(verify_download("alpha", &release, b"not a zip").is_err());
         Ok(())
     }
@@ -1950,4 +1960,20 @@ mod tests {
         assert!(packs(State(app)).await?.0.is_empty());
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[test]
+fn streamed_archive_hash_matches_known_digest() -> Result<()> {
+    let mut file = tempfile::NamedTempFile::new()?;
+    assert_eq!(
+        hash_file(file.path())?,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    file.write_all(&vec![b'x'; 64 * 1024 * 3 + 17])?;
+    assert_eq!(
+        hash_file(file.path())?,
+        "3a1c448c6ee68c5953257e5a0d18e495d611afb4943a6b21cede698a9a5abf8a"
+    );
+    Ok(())
 }

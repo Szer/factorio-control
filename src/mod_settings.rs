@@ -1,3 +1,4 @@
+use crate::hex;
 use crate::{Error, Result, storage};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -245,7 +246,7 @@ fn describe(name: &str, node: &Node) -> ModSetting {
 pub fn decode(bytes: &[u8]) -> Result<ModSettingsDocument> {
     let nodes = values(bytes)?;
     Ok(ModSettingsDocument {
-        revision: format!("{:x}", Sha256::digest(bytes)),
+        revision: hex(&Sha256::digest(bytes)),
         available: true,
         settings: nodes
             .iter()
@@ -389,10 +390,9 @@ pub fn apply(bytes: &[u8], changes: &BTreeMap<String, ModSettingChange>) -> Resu
 pub fn replace(path: &Path, revision: &str, bytes: &[u8]) -> Result<ModSettingsDocument> {
     let document = decode(bytes)?;
     let previous = read_bytes(path)?;
-    let current_revision = previous.as_ref().map_or_else(
-        || "missing".into(),
-        |data| format!("{:x}", Sha256::digest(data)),
-    );
+    let current_revision = previous
+        .as_ref()
+        .map_or_else(|| "missing".into(), |data| hex(&Sha256::digest(data)));
     if current_revision != revision {
         return Err(Error::conflict(
             "Startup settings changed. Reload before saving",
@@ -405,7 +405,7 @@ pub fn update(path: &Path, patch: ModSettingsPatch) -> Result<ModSettingsDocumen
     let bytes = read_bytes(path)?.ok_or_else(|| {
         Error::bad("Upload a game-generated mod-settings.dat to configure startup settings")
     })?;
-    if format!("{:x}", Sha256::digest(&bytes)) != patch.revision {
+    if hex(&Sha256::digest(&bytes)) != patch.revision {
         return Err(Error::conflict(
             "Startup settings changed. Reload before saving",
         ));

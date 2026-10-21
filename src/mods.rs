@@ -1,3 +1,4 @@
+use crate::hex;
 #[path = "save_sync.rs"]
 pub mod save_sync;
 #[path = "mod_workflows.rs"]
@@ -205,7 +206,8 @@ fn read_info<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> Resul
     let mut info_path = None;
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|_| zip_error())?;
-        let name = entry.name();
+        storage::validate_zip_encoding(entry.name_raw(), entry.flags().as_u16())?;
+        let name = entry.name().map_err(|_| zip_error())?;
         let mut parts = name.split('/');
         if parts.next().is_some()
             && parts.next() == Some("info.json")
@@ -246,25 +248,26 @@ fn validate_archive_reader<R: Read + std::io::Seek>(reader: R, size: u64) -> Res
     }
     let mut archive = zip::ZipArchive::new(reader).map_err(|_| zip_error())?;
     let info = read_info(&mut archive)?;
-    let prefix = archive
-        .file_names()
-        .find_map(|name| {
-            let (root, file) = name.split_once('/')?;
-            (file == "info.json").then(|| format!("{root}/"))
-        })
+    let mut prefix = None;
+    for name in archive.file_names() {
+        let name = name.map_err(|_| zip_error())?;
+        if let Some((root, "info.json")) = name.split_once('/') {
+            prefix = Some(format!("{root}/"));
+        }
+    }
+    let prefix = prefix
         .ok_or_else(|| Error::bad("Mod ZIP must have one root directory containing info.json"))?;
     let mut paths = HashSet::new();
     let mut expanded = 0_u64;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|_| zip_error())?;
+        storage::validate_zip_encoding(entry.name_raw(), entry.flags().as_u16())?;
+        let name = entry.name().map_err(|_| zip_error())?;
         if entry.enclosed_name().is_none()
-            || entry.name().contains('\\')
-            || entry
-                .name()
-                .split('/')
-                .any(|part| matches!(part, "." | ".."))
-            || !entry.name().starts_with(&prefix)
-            || !paths.insert(entry.name().to_owned())
+            || name.contains('\\')
+            || name.split('/').any(|part| matches!(part, "." | ".."))
+            || !name.starts_with(&prefix)
+            || !paths.insert(name.into_owned())
             || entry
                 .unix_mode()
                 .is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000 | 0o040000))
@@ -489,7 +492,7 @@ pub fn list(app: &App) -> Result<ModsDocument> {
         );
     }
     Ok(ModsDocument {
-        revision: format!("{:x}", hash.finalize()),
+        revision: hex(&hash.finalize()),
         mods: selected.into_values().collect(),
         portal_authenticated: credentials(app)?.is_some(),
     })
