@@ -18,6 +18,7 @@ def require(condition, message):
 
 engine = shlex.split(os.environ.get("CONTAINER_ENGINE", "docker"))
 image = sys.argv[1]
+direct_http = "--direct-http" in sys.argv[2:]
 name = "factorio-control-test-" + uuid.uuid4().hex[:12]
 volume = name + "-data"
 network = name + "-network"
@@ -37,9 +38,9 @@ def command(*arguments, check=True, timeout=30):
     return result
 
 
-def request(path, body=None, authenticated=True, request_origin=origin, method=None, client_ip="198.51.100.50"):
+def request(path, body=None, authenticated=True, request_origin=None, method=None, client_ip="198.51.100.50"):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
-    headers = {"Host": host, "Origin": request_origin, "X-Forwarded-For": client_ip}
+    headers = {"Host": host, "Origin": request_origin or origin, "X-Forwarded-For": client_ip}
     if cookie and authenticated:
         headers["Cookie"] = cookie
     if body is not None:
@@ -92,7 +93,8 @@ def wait_state(states):
 try:
     command("volume", "create", volume)
     command("network", "create", network)
-    proxy_code = r"""
+    if not direct_http:
+        proxy_code = r"""
 import http.client
 import http.server
 
@@ -122,21 +124,25 @@ class Proxy(http.server.BaseHTTPRequestHandler):
     do_PUT = forward
 
 http.server.ThreadingHTTPServer(('0.0.0.0', 8081), Proxy).serve_forever()
-"""
-    command("run", "-d", "--name", proxy, "--network", network,
-            "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges", "--pids-limit", "64",
-            "-p", "127.0.0.1::8081", "docker.io/library/python:3.12-alpine", "python", "-c", proxy_code, timeout=120)
-    proxy_ip = json.loads(command("inspect", proxy).stdout)[0]["NetworkSettings"]["Networks"][network]["IPAddress"]
-    require(proxy_ip, "Isolated reverse proxy has no transport address")
+    """
+        command("run", "-d", "--name", proxy, "--network", network,
+                "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges", "--pids-limit", "64",
+                "-p", "127.0.0.1::8081", "docker.io/library/python:3.12-alpine", "python", "-c", proxy_code, timeout=120)
+        proxy_ip = json.loads(command("inspect", proxy).stdout)[0]["NetworkSettings"]["Networks"][network]["IPAddress"]
+        require(proxy_ip, "Isolated reverse proxy has no transport address")
     mount = volume + ":/data" + (":U" if engine[-1] == "podman" else "")
+    environment = [] if direct_http else ["-e", "FC_PUBLIC_URL=" + origin, "-e", "FC_TRUSTED_PROXIES=" + proxy_ip]
     command(
         "run", "-d", "--name", name, "--network", network, "--network-alias", "control", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
         "-p", "127.0.0.1::8080", "-p", "127.0.0.1::34197/udp",
-        "-e", "FC_PUBLIC_URL=" + origin, "-e", "FC_TRUSTED_PROXIES=" + proxy_ip, "--volume", mount, image,
+        *environment, "--volume", mount, image,
     )
-    port = int(command("port", proxy, "8081/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
+    port = int(command("port", name if direct_http else proxy, "8080/tcp" if direct_http else "8081/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
+    if direct_http:
+        host = f"127.0.0.1:{port}"
+        origin = f"http://{host}"
     wait_ready()
     require(request("/api/status", authenticated=False)[0] == 401, "Anonymous access was allowed")
     command("exec", name, "/app/factorio-control", "--healthcheck")
@@ -146,7 +152,7 @@ http.server.ThreadingHTTPServer(('0.0.0.0', 8081), Proxy).serve_forever()
     status, headers, account = request("/api/auth/login", credentials, authenticated=False)
     require(status == 200 and account["user"]["must_change_password"], "Temporary account was not restricted")
     session_cookie = headers.get("set-cookie", headers.get("Set-Cookie", ""))
-    require("Secure" in session_cookie and "HttpOnly" in session_cookie and "SameSite=Strict" in session_cookie, "Public cookie protections are missing")
+    require(("Secure" in session_cookie) == (not direct_http) and "HttpOnly" in session_cookie and "SameSite=Strict" in session_cookie, "Session cookie protections do not match the configured scheme")
     cookie = session_cookie.split(";", 1)[0]
     require(request("/api/status")[0] == 403, "Temporary account accessed game controls")
     password = secrets.token_urlsafe(32)
@@ -156,10 +162,11 @@ http.server.ThreadingHTTPServer(('0.0.0.0', 8081), Proxy).serve_forever()
     status, headers, account = request("/api/auth/login", {"username": "admin", "password": password}, authenticated=False)
     require(status == 200 and not account["user"]["must_change_password"], "Changed account could not sign in")
     cookie = headers.get("set-cookie", headers.get("Set-Cookie", "")).split(";", 1)[0]
-    for attempt in range(6):
-        status = request("/api/auth/login", {"username": "admin", "password": "incorrect-fixture"}, authenticated=False, client_ip="198.51.100.99")[0]
-        require(status == (429 if attempt == 5 else 401), f"Proxy client throttling is not isolated: attempt {attempt + 1}, status {status}")
-    require(request("/api/auth/login", {"username": "admin", "password": password}, authenticated=False)[0] == 200, "An attack from another proxy client blocked valid login")
+    if not direct_http:
+        for attempt in range(6):
+            status = request("/api/auth/login", {"username": "admin", "password": "incorrect-fixture"}, authenticated=False, client_ip="198.51.100.99")[0]
+            require(status == (429 if attempt == 5 else 401), f"Proxy client throttling is not isolated: attempt {attempt + 1}, status {status}")
+        require(request("/api/auth/login", {"username": "admin", "password": password}, authenticated=False)[0] == 200, "An attack from another proxy client blocked valid login")
     require(request("/api/server/stop", {}, request_origin="https://attacker.invalid")[0] == 403, "Cross-origin mutation was allowed")
     status, _, value = request("/api/status")
     require(status == 200 and value["version"] == Path(".factorio-version").read_text().strip(), "Bundled Factorio version differs from configured version")
@@ -182,12 +189,20 @@ http.server.ThreadingHTTPServer(('0.0.0.0', 8081), Proxy).serve_forever()
     require(request("/api/server/start", {"save": "smoke-world.zip"})[0] == 200, "Second game start failed")
     wait_state({"running", "paused"})
     command("restart", "--time", "150", name, timeout=170)
-    port = int(command("port", proxy, "8081/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
+    port = int(command("port", name if direct_http else proxy, "8080/tcp" if direct_http else "8081/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
+    if direct_http:
+        host = f"127.0.0.1:{port}"
+        origin = f"http://{host}"
     wait_ready()
     require(request("/api/status")[0] == 401, "Session survived restart")
     require(command("exec", name, "test", "!", "-e", "/data/bootstrap-admin.json", check=False).returncode == 0, "Restart recreated bootstrap credentials")
     require(request("/api/auth/login", {"username": "admin", "password": password}, authenticated=False)[0] == 200, "Account did not persist")
-    print("Image passed: non-root, bridge networking, authentication, password rotation, world creation, game lifecycle and restart persistence.")
+    if direct_http:
+        # The successful post-restart login consumes one of the five attempts.
+        for attempt in range(5):
+            status = request("/api/auth/login", {"username": "admin", "password": "incorrect-fixture"}, authenticated=False, client_ip=f"198.51.100.{attempt + 1}")[0]
+            require(status == (429 if attempt == 4 else 401), "Untrusted forwarding headers bypassed direct HTTP login throttling")
+    print("Image passed (" + ("direct HTTP" if direct_http else "HTTPS proxy") + "): non-root, bridge networking, authentication, password rotation, world creation, game lifecycle and restart persistence.")
 finally:
     command("rm", "--force", name, check=False)
     command("rm", "--force", proxy, check=False)

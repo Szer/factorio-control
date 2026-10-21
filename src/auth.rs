@@ -399,10 +399,10 @@ impl Auth {
     ) -> Result<Self> {
         let trusted_proxies = parse_trusted_proxies(trusted_proxies)?;
         storage::ensure_directory(directory)?;
-        let public_origin = public_url.map(|value| {
-            let url = url::Url::parse(value).map_err(|_| Error::bad("FC_PUBLIC_URL must be an HTTPS origin"))?;
-            if url.scheme() != "https" || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
-                return Err(Error::bad("FC_PUBLIC_URL must be an HTTPS origin without credentials, path, query or fragment"));
+        let public_origin = public_url.filter(|value| !value.trim().is_empty()).map(|value| {
+            let url = url::Url::parse(value).map_err(|_| Error::bad("FC_PUBLIC_URL must be an HTTP or HTTPS origin"))?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+                return Err(Error::bad("FC_PUBLIC_URL must be an HTTP or HTTPS origin without credentials, path, query or fragment"));
             }
             Ok(url)
         }).transpose()?;
@@ -435,18 +435,11 @@ impl Auth {
     }
 
     pub async fn validate_bind(&self, bind: SocketAddr) -> Result<()> {
-        if self.public_origin.is_some() && self.trusted_proxies.is_empty() {
-            return Err(Error::bad(
-                "Public HTTPS deployments require explicit FC_TRUSTED_PROXIES; configure the actual reverse-proxy addresses and restrict ingress",
-            ));
-        }
         if !bind.ip().is_loopback() {
             let mut runtime = self.inner.lock().await;
             self.refresh(&mut runtime)?;
-            if runtime.accounts.is_empty() || self.public_origin.is_none() {
-                return Err(Error::bad(
-                    "Nonloopback FC_BIND requires panel accounts and an explicit HTTPS FC_PUBLIC_URL",
-                ));
+            if runtime.accounts.is_empty() {
+                return Err(Error::bad("Nonloopback FC_BIND requires panel accounts"));
             }
         }
         Ok(())
@@ -493,7 +486,11 @@ impl Auth {
     fn cookie(&self, token: &str, max_age: u64) -> Result<axum::http::HeaderValue> {
         format!(
             "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{}",
-            if self.public_origin.is_some() {
+            if self
+                .public_origin
+                .as_ref()
+                .is_some_and(|origin| origin.scheme() == "https")
+            {
                 "; Secure"
             } else {
                 ""

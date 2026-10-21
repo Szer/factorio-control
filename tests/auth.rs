@@ -150,11 +150,9 @@ async fn first_start_requires_authentication_and_preserves_private_bootstrap_on_
     auth.validate_bind("127.0.0.1:9400".parse::<SocketAddr>()?)
         .await
         .map_err(|e| e.message)?;
-    assert!(
-        auth.validate_bind("0.0.0.0:9400".parse::<SocketAddr>()?)
-            .await
-            .is_err()
-    );
+    auth.validate_bind("0.0.0.0:9400".parse::<SocketAddr>()?)
+        .await
+        .map_err(|e| e.message)?;
     let file = temp.path().join(auth::BOOTSTRAP_FILE);
     let credentials = std::fs::read(&file)?;
     let value: Value = serde_json::from_slice(&credentials)?;
@@ -457,12 +455,10 @@ async fn public_origin_and_loopback_modes_reject_cross_origin_requests() -> Test
         StatusCode::FORBIDDEN
     );
     let public = Auth::load(temp.path(), Some("https://panel.example")).map_err(|e| e.message)?;
-    assert!(
-        public
-            .validate_bind("0.0.0.0:9400".parse::<SocketAddr>()?)
-            .await
-            .is_err()
-    );
+    public
+        .validate_bind("0.0.0.0:9400".parse::<SocketAddr>()?)
+        .await
+        .map_err(|e| e.message)?;
     let public = Auth::load_with_trusted_proxies(
         temp.path(),
         Some("https://panel.example"),
@@ -522,11 +518,12 @@ async fn public_origin_and_loopback_modes_reject_cross_origin_requests() -> Test
 }
 
 #[test]
-fn public_origin_requires_https_and_no_credentials_or_path() -> TestResult {
+fn public_origin_rejects_unsupported_schemes_credentials_and_paths() -> TestResult {
     let temp = tempfile::tempdir()?;
     auth::bootstrap_admin(temp.path(), "owner", PASSWORD).map_err(|e| e.message)?;
     for value in [
-        "http://panel.example",
+        "ftp://panel.example",
+        "file:///tmp/panel",
         "https://user:pass@panel.example",
         "https://panel.example/path",
         "https://panel.example/?q=1",
@@ -1141,6 +1138,81 @@ async fn legacy_argon2_accounts_can_login_rotate_password_and_restart() -> TestR
         local(&router, Method::GET, "/api/status", Some(&cookie), None)
             .await?
             .status,
+        StatusCode::OK
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_http_origin_authenticates_without_tls_or_proxy_trust() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let auth = configured(temp.path(), Some("http://panel.example:8181")).map_err(|e| e.message)?;
+    auth.validate_bind("0.0.0.0:8080".parse()?)
+        .await
+        .map_err(|e| e.message)?;
+    let router = app(auth);
+    assert_eq!(
+        call(
+            &router,
+            Method::GET,
+            "/api/status",
+            None,
+            None,
+            None,
+            "panel.example:8181"
+        )
+        .await?
+        .status,
+        StatusCode::UNAUTHORIZED
+    );
+    let input = json!({"username":"owner","password":PASSWORD});
+    for (origin, host) in [
+        (Some("https://panel.example:8181"), "panel.example:8181"),
+        (Some("http://attacker.example"), "panel.example:8181"),
+        (None, "panel.example:8181"),
+        (Some("http://panel.example:8181"), "attacker.example"),
+    ] {
+        assert_eq!(
+            call(
+                &router,
+                Method::POST,
+                "/api/auth/login",
+                None,
+                Some(input.clone()),
+                origin,
+                host
+            )
+            .await?
+            .status,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let signed = call(
+        &router,
+        Method::POST,
+        "/api/auth/login",
+        None,
+        Some(input),
+        Some("http://panel.example:8181"),
+        "panel.example:8181",
+    )
+    .await?;
+    assert_eq!(signed.status, StatusCode::OK);
+    let cookie = signed.cookie.ok_or("Missing HTTP session cookie")?;
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+    assert!(!cookie.contains("Secure"));
+    assert_eq!(
+        call(
+            &router,
+            Method::GET,
+            "/api/status",
+            Some(&cookie),
+            None,
+            None,
+            "panel.example:8181"
+        )
+        .await?
+        .status,
         StatusCode::OK
     );
     Ok(())

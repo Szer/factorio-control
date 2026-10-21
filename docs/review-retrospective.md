@@ -54,6 +54,6 @@ Full-App draft and shared-request-helper regressions also fail on intermediate f
 
 CI runs formatting, strict lint/type checks, Rust and browser regressions, release-script tests, high-severity dependency auditing, bundled-engine integration tests and image smoke tests before publication. Developer fixtures are synthetic and isolated from production credentials and worlds.
 
-Public deployment requires correct reverse-proxy identity and restricted ingress. Shared NAT clients share a rate bucket, and bounded password workers do not provide distributed denial-of-service protection. Research reconciliation can delay unqueued completion notices by up to 30 seconds; changes that are reversed entirely between observations may be missed.
+Forwarded client identities require explicit proxy trust and restricted ingress. Clients sharing an untrusted proxy or NAT share a rate bucket, and bounded password workers do not provide distributed denial-of-service protection. Research reconciliation can delay unqueued completion notices by up to 30 seconds; changes that are reversed entirely between observations may be missed.
 
 Factorio crash reports document temporary save files: [failed save leaves `.tmp.zip`](https://forums.factorio.com/viewtopic.php?t=123564). Authentication lockout policy follows [OWASP's denial-of-service considerations](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html#account-lockout).

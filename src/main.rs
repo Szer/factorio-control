@@ -19,6 +19,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind: SocketAddr = std::env::var("FC_BIND")
         .unwrap_or_else(|_| "127.0.0.1:9400".into())
         .parse()?;
+    let public_url = std::env::var("FC_PUBLIC_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
     if std::env::args().any(|arg| arg == "--healthcheck") {
         let address = SocketAddr::new(
             if bind.ip().is_unspecified() {
@@ -32,12 +35,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             bind.port(),
         );
-        let host = match std::env::var("FC_PUBLIC_URL") {
-            Ok(value) => {
-                let origin = url::Url::parse(&value)?;
+        let host = match public_url.as_deref() {
+            Some(value) => {
+                let origin = url::Url::parse(value)?;
                 origin[url::Position::BeforeHost..url::Position::AfterPort].to_owned()
             }
-            Err(_) => address.to_string(),
+            None => address.to_string(),
         };
         let _: auth::SessionStatus = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
@@ -70,7 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Administrator created. Restart the manager to sign in.");
         return Ok(());
     }
-    let public_url = std::env::var("FC_PUBLIC_URL").ok();
     let trusted_proxies = std::env::var_os("FC_TRUSTED_PROXIES")
         .map(|value| {
             value
