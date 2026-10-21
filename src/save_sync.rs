@@ -1,4 +1,5 @@
 use super::*;
+use crate::hex;
 use crate::save_metadata;
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -326,7 +327,7 @@ fn build_plan(
     disable.sort();
     Ok((
         SyncPlan {
-            revision: format!("{:x}", hash.finalize()),
+            revision: hex(&hash.finalize()),
             save: name.into(),
             factorio_version: metadata.factorio_version,
             engine_version: engine.into(),

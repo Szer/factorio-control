@@ -1,8 +1,6 @@
+use crate::hex;
 use crate::{Error, Result, storage};
-use argon2::{
-    Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
-    password_hash::SaltString,
-};
+use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use axum::{
     Extension, Json, Router,
     body::Body,
@@ -196,19 +194,13 @@ fn hash_password(password: &str) -> Result<String> {
             "Secure randomness is unavailable",
         )
     })?;
-    let salt = SaltString::encode_b64(&bytes).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to protect password",
-        )
-    })?;
     Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
         Params::new(19456, 2, 1, Some(32))
             .map_err(|_| Error::bad("Invalid password hashing policy"))?,
     )
-    .hash_password(password.as_bytes(), &salt)
+    .hash_password_with_salt(password.as_bytes(), &bytes)
     .map(|hash| hash.to_string())
     .map_err(|_| {
         error(
@@ -677,11 +669,8 @@ fn accounts_document(runtime: &Runtime) -> AccountsDocument {
         accounts: runtime.accounts.iter().map(public_account).collect(),
     }
 }
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 fn token_key(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
+    hex(&Sha256::digest(token.as_bytes()))
 }
 fn request_token(headers: &HeaderMap) -> Option<&str> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;

@@ -1,3 +1,4 @@
+use crate::hex;
 use crate::{Error, Result, models::*};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -10,6 +11,13 @@ use std::{
 
 pub const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
 pub const MAX_SAVE_BYTES: u64 = 1024 * 1024 * 1024;
+
+pub(crate) fn validate_zip_encoding(name: &[u8], flags: u16) -> Result<()> {
+    if flags & (1 << 11) != 0 && std::str::from_utf8(name).is_err() {
+        return Err(Error::bad("Archive contains an invalid UTF-8 entry name"));
+    }
+    Ok(())
+}
 
 pub fn ensure_regular(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -40,7 +48,7 @@ pub fn read_document(path: &Path) -> Result<(String, Option<Vec<u8>>)> {
     if bytes.len() as u64 > MAX_SETTINGS_BYTES {
         return Err(Error::bad("Configuration file exceeds 1 MiB"));
     }
-    let revision = format!("{:x}", Sha256::digest(&bytes));
+    let revision = hex(&Sha256::digest(&bytes));
     Ok((revision, Some(bytes)))
 }
 pub fn atomic_write(path: &Path, bytes: &[u8], overwrite: bool) -> Result<()> {
@@ -398,20 +406,17 @@ pub fn save_path(directory: &Path, name: &str) -> Result<PathBuf> {
 pub fn save_info(directory: &Path, name: &str) -> Result<Save> {
     let meta = fs::metadata(save_path(directory, name)?)?;
     use std::os::unix::fs::MetadataExt;
-    let revision = format!(
-        "{:x}",
-        Sha256::digest(
-            format!(
-                "{}:{}:{}:{}:{}",
-                meta.dev(),
-                meta.ino(),
-                meta.len(),
-                meta.mtime(),
-                meta.mtime_nsec()
-            )
-            .as_bytes()
+    let revision = hex(&Sha256::digest(
+        format!(
+            "{}:{}:{}:{}:{}",
+            meta.dev(),
+            meta.ino(),
+            meta.len(),
+            meta.mtime(),
+            meta.mtime_nsec()
         )
-    );
+        .as_bytes(),
+    ));
     Ok(Save {
         revision,
         name: name.into(),
@@ -456,10 +461,14 @@ pub fn validate_save_reader(reader: impl Read + Seek) -> Result<()> {
         let entry = archive
             .by_index(i)
             .map_err(|_| Error::bad("Archive contains an unreadable entry"))?;
+        validate_zip_encoding(entry.name_raw(), entry.flags().as_u16())?;
         if entry.enclosed_name().is_none() {
             return Err(Error::bad("Archive contains an unsafe entry path"));
         }
-        if entry.name().ends_with("/level.dat") || entry.name().ends_with("/level.dat0") {
+        let name = entry
+            .name()
+            .map_err(|_| Error::bad("Archive contains an unreadable entry name"))?;
+        if name.ends_with("/level.dat") || name.ends_with("/level.dat0") {
             level = true;
         }
     }

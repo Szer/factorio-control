@@ -46,10 +46,12 @@ pub fn read(path: &Path) -> Result<SaveMetadata> {
     let mut header_index = None;
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|_| invalid())?;
-        if entry.enclosed_name().is_none() || !names.insert(entry.name().to_owned()) {
+        crate::storage::validate_zip_encoding(entry.name_raw(), entry.flags().as_u16())?;
+        let entry_name = entry.name().map_err(|_| invalid())?;
+        if entry.enclosed_name().is_none() || !names.insert(entry_name.clone().into_owned()) {
             return Err(Error::bad("Save ZIP contains unsafe or duplicate paths"));
         }
-        let Some((root, name)) = entry.name().split_once('/') else {
+        let Some((root, name)) = entry_name.split_once('/') else {
             continue;
         };
         if name != "level-init.dat" {
