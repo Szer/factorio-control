@@ -4,7 +4,7 @@ A local Factorio control room built with Rust and strict React/TypeScript. Manag
 
 ## Run locally
 
-Use Rust 1.99.1 and Node 22. The service listens at http://127.0.0.1:9400 and stores files under `./data`.
+Use Rust 1.99.1 and Node 26. The service listens at http://127.0.0.1:9400 and stores files under `./data`.
 
 ```sh
 cd web

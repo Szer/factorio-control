@@ -1,6 +1,6 @@
-FROM node:22-bookworm-slim AS web
+FROM node:26-bookworm-slim AS web
 WORKDIR /build/web
-COPY web/package*.json ./
+COPY web/package*.json web/.npmrc ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run check && npm test && npm run build
