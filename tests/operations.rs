@@ -326,9 +326,9 @@ async fn commands_and_force_stop_only_touch_owned_running_child() -> TestResult 
     storage::update_manager_settings(&app.manager_settings_path(), manager).map_err(failure)?;
     fs::write(app.settings_path(), br#"{"auto_pause":false}"#)?;
     process::start(&app, "world.zip").await.map_err(failure)?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let running_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while app.inner.lock().await.status.state != ServerState::Running {
-        assert!(tokio::time::Instant::now() < deadline);
+        assert!(tokio::time::Instant::now() < running_deadline);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(process::create_save(&app, "other.zip").await.is_err());
@@ -347,8 +347,15 @@ async fn commands_and_force_stop_only_touch_owned_running_child() -> TestResult 
     process::send_command(&app, command)
         .await
         .map_err(failure)?;
-    while !app.directory.join("commands.txt").exists() {
-        assert!(tokio::time::Instant::now() < deadline);
+    let command_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs::read_to_string(app.directory.join("commands.txt")) {
+            Ok(contents) if contents == "/players\n" => break,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        assert!(tokio::time::Instant::now() < command_deadline);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(
@@ -358,12 +365,13 @@ async fn commands_and_force_stop_only_touch_owned_running_child() -> TestResult 
     let args = fs::read_to_string(app.directory.join("args.txt"))?;
     assert!(args.contains("--bind\n127.0.0.1\n--port\n34199\n"));
     process::force_stop(&app, true).await.map_err(failure)?;
+    let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         process::poll(&app).await;
         if app.inner.lock().await.child.is_none() {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline);
+        assert!(tokio::time::Instant::now() < exit_deadline);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(app.inner.lock().await.status.state, ServerState::Failed);
