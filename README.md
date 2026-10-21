@@ -20,11 +20,11 @@ The executable is optional for exploring the UI; start stays disabled until it i
 
 The public image `ghcr.io/szer/factorio-control` bundles Control and the Linux x86-64 Factorio headless server. It runs as UID/GID 10001 with a read-only root filesystem, dropped capabilities, and a persistent `/data` volume. Authentication is mandatory. The container health check verifies the manager independently of whether the game is running.
 
-Copy `compose.yaml` into a Dockge stack, set `FC_PUBLIC_URL` to the exact HTTPS origin and `FC_TRUSTED_PROXIES` to the real proxy IP addresses, then deploy. For Docker Compose:
+Copy `compose.yaml` into a Dockge stack or use Docker Compose. The panel serves HTTP; TLS termination belongs to the deployment.
 
 ```sh
 cp .env.example .env
-# Set your HTTPS origin and exact proxy IPs in .env.
+# Configure the browser-facing origin and proxy IPs when needed.
 docker compose up -d
 ```
 
@@ -101,9 +101,9 @@ Passwords use Argon2id v19 with 19 MiB memory, two iterations, one lane, a uniqu
 
 Use at least 12 characters for your replacement password. Panel accounts are separate from Factorio.com credentials and game administrators. Administrators manage accounts and server configuration; operators manage game operations, saves, and mods; viewers have read-only access. Password and role changes revoke the affected sessions. The final administrator cannot be removed or demoted.
 
-For a reverse proxy, configure `FC_TRUSTED_PROXIES` with its exact IP addresses as seen by Control; restrict ingress to those proxies and have the proxy replace or append the real client address in `X-Forwarded-For`. Only configured transport peers can supply forwarded addresses. Public HTTPS deployment refuses to start without explicit proxy trust. Local operation with no public URL ignores forwarded headers unless configured; clients sharing NAT share one rate bucket. Do not guess a Docker gateway address. See [Dockge proxy configuration](docs/dockge.md).
+For a reverse proxy, configure `FC_TRUSTED_PROXIES` with its exact IP addresses as seen by Control; restrict ingress to those proxies and have the proxy replace or append the real client address in `X-Forwarded-For`. Only configured transport peers can supply forwarded addresses. Without configured proxy trust, forwarded headers are ignored and clients sharing a proxy or NAT share one rate bucket. Do not guess a Docker gateway address. See [Dockge proxy configuration](docs/dockge.md).
 
-For a reverse proxy, add `FC_PUBLIC_URL` to the service's `environment` with the exact HTTPS origin (for example `https://factorio.example.com`) and preserve its Host header. Bind to loopback when the proxy runs on the same host; a nonloopback `FC_BIND` requires an explicit HTTPS public origin. TLS terminates at the proxy; forwarded headers do not expand trusted origins. Session cookies are HttpOnly, SameSite=Strict, and Secure with a public origin. Sessions expire and must be re-established after manager restarts.
+Set `FC_PUBLIC_URL` to the exact browser-facing HTTP or HTTPS origin when using a non-loopback hostname, for example `http://192.0.2.10:8181` or `https://factorio.example.com`. Leave it empty for localhost access. Preserve its Host header through a proxy; forwarded headers do not expand trusted origins. Session cookies are HttpOnly and SameSite=Strict, with Secure enabled for a configured HTTPS origin. Sessions expire and must be re-established after manager restarts.
 
 Keep `panel-accounts.json` and the data directory private. Back them up before moving installations. Choose your permanent password during first sign-in. Do not share or retain the bootstrap credential file.
 

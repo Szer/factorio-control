@@ -1,15 +1,17 @@
 # Dockge deployment
 
-Use the repository's `compose.yaml` as the stack definition. Set `FC_PUBLIC_URL` to the exact public HTTPS origin and `FC_TRUSTED_PROXIES` to the actual proxy IPs in Dockge's environment editor. Set `CONTROL_IMAGE` to a published digest for a pinned deployment.
+Use the repository's `compose.yaml` as the stack definition. Set `CONTROL_IMAGE` to a published digest for a pinned deployment. The panel serves HTTP; the deployment decides whether and where to terminate TLS.
 
-The image serves HTTP on container port 8080. The existing reverse proxy can keep using host port 8181 and must preserve the public Host header. Host HTTP binds to 127.0.0.1 unless `CONTROL_LISTEN_ADDRESS` is set. A container or remote proxy needs an address it can reach; allow that proxy through the host firewall. TLS terminates at the proxy. Do not publish RCON.
+For localhost access, leave `FC_PUBLIC_URL` empty. For another hostname or IP, set the exact browser-facing HTTP or HTTPS origin in Dockge, such as `http://192.0.2.10:8181` or `https://factorio.example.com`. HTTPS origins enable Secure session cookies.
+
+The image serves HTTP on container port 8080. The existing reverse proxy can keep using host port 8181 and must preserve the public Host header. Host HTTP binds to 127.0.0.1 unless `CONTROL_LISTEN_ADDRESS` is set. A container or remote proxy needs an address it can reach; allow that proxy through the host firewall. A proxy may terminate TLS. Do not publish RCON.
 
 
 ## Proxy client addresses
 
 Set `FC_TRUSTED_PROXIES` in Dockge to the exact comma-separated proxy IPs that connect to Control. The proxy must preserve Host and replace or append the actual client IP in one `X-Forwarded-For` header. Restrict port 8181 to those proxies; a trusted Docker gateway must not also represent untrusted direct traffic.
 
-The setting accepts up to 64 IPv4/IPv6 addresses, with no CIDR ranges. Public HTTPS deployment requires this setting and refuses startup when it is empty. Local operation without a public URL can leave it empty and ignores forwarding headers. Clients sharing NAT share the five-attempts-per-minute login bucket; identify the real proxy network before public deployment instead of guessing an address.
+The optional setting accepts up to 64 IPv4/IPv6 addresses, with no CIDR ranges. Without configured trust, forwarding headers are ignored and clients sharing a proxy or NAT share the five-attempts-per-minute login bucket. Identify the proxy network before enabling forwarded client addresses.
 
 The forwarded chain is bounded and evaluated from the trusted connection toward the client. Untrusted peers cannot choose their rate-limit identity by sending a header. Incorrectly configured trusted proxies fail login rather than trusting a fabricated address.
 

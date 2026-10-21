@@ -95,13 +95,13 @@ fn empty_optional_trusted_proxies_allow_main_to_listen() -> Result<(), Box<dyn s
     use std::sync::mpsc;
     use std::time::Duration;
 
-    for value in ["", "  "] {
+    for (bind, value) in [("127.0.0.1:0", ""), ("0.0.0.0:0", "  ")] {
         let temporary = tempfile::tempdir()?;
         let mut child = Command::new(env!("CARGO_BIN_EXE_factorio-control"))
             .env("FC_DATA_DIR", temporary.path().join("data"))
-            .env("FC_BIND", "127.0.0.1:0")
+            .env("FC_BIND", bind)
             .env("FC_TRUSTED_PROXIES", value)
-            .env_remove("FC_PUBLIC_URL")
+            .env("FC_PUBLIC_URL", value)
             .env_remove("FC_FACTORIO_BIN")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -112,7 +112,7 @@ fn empty_optional_trusted_proxies_allow_main_to_listen() -> Result<(), Box<dyn s
         let reader = std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
-                if line.starts_with("Factorio Control listening on http://127.0.0.1:") {
+                if line.starts_with("Factorio Control listening on http://") {
                     let _sent = sender.send(true);
                     return;
                 }
