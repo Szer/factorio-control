@@ -2,7 +2,7 @@
 
 Use the repository's `compose.yaml` as the stack definition. Set `CONTROL_IMAGE` to a published digest for a pinned deployment. The panel serves HTTP; the deployment decides whether and where to terminate TLS.
 
-For localhost access, leave `FC_PUBLIC_URL` empty. For another hostname or IP, set the exact browser-facing HTTP or HTTPS origin in Dockge, such as `http://192.0.2.10:8181` or `https://factorio.example.com`. HTTPS origins enable Secure session cookies.
+For localhost access, leave `FC_PUBLIC_URL` empty. For another hostname or IP, set the exact browser-facing HTTP or HTTPS origin in Dockge, such as `http://192.0.2.10:8181` or `https://factorio.example.com`. HTTPS origins enable Secure session cookies. Set `FC_SESSION_TTL_SECONDS` under `environment` to change the fixed session lifetime; the default is `2592000` seconds (30 days).
 
 The image serves HTTP on container port 8080. The existing reverse proxy can keep using host port 8181 and must preserve the public Host header. Host HTTP binds to 127.0.0.1 unless `CONTROL_LISTEN_ADDRESS` is set. A container or remote proxy needs an address it can reach; allow that proxy through the host firewall. A proxy may terminate TLS. Do not publish RCON.
 

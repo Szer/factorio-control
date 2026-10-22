@@ -563,6 +563,60 @@ async fn mutation<T: Send + 'static>(
         message: "Mod storage task failed".into(),
     })?
 }
+async fn mod_mutation(
+    app: &App,
+    work: impl FnOnce(App, Option<String>) -> Result<ModsDocument> + Send + 'static,
+) -> Result<ModsDocument> {
+    mutation(app, move |app, engine| {
+        let before = list(&app)?;
+        let after = work(app.clone(), engine)?;
+        record_mod_activity(&app, &before.mods, &after.mods);
+        Ok(after)
+    })
+    .await
+}
+
+// Called by blocking storage workers after a successful commit, with the mod gate held.
+fn record_mod_activity(app: &App, before: &[InstalledMod], after: &[InstalledMod]) {
+    use crate::telemetry::ActivityKind;
+    let before: BTreeMap<_, _> = before
+        .iter()
+        .map(|item| (item.name.as_str(), item))
+        .collect();
+    let after: BTreeMap<_, _> = after
+        .iter()
+        .map(|item| (item.name.as_str(), item))
+        .collect();
+    let mut events = Vec::new();
+    for (name, item) in &after {
+        match before.get(name) {
+            None => events.push((
+                ActivityKind::ModAdded,
+                format!("{} {}", item.name, item.version),
+            )),
+            Some(previous) if previous.version != item.version => events.push((
+                ActivityKind::ModUpdated,
+                format!("{}: {} → {}", item.name, previous.version, item.version),
+            )),
+            _ => {}
+        }
+    }
+    for (name, item) in &before {
+        if !after.contains_key(name) {
+            events.push((
+                ActivityKind::ModRemoved,
+                format!("{} {}", item.name, item.version),
+            ));
+        }
+    }
+    if !events.is_empty() {
+        let mut inner = app.inner.blocking_lock();
+        for (kind, message) in events {
+            inner.telemetry.activity(kind, message);
+        }
+    }
+}
+
 fn checked_engine(engine: Option<&str>) -> Result<&str> {
     engine.filter(|value| version(value).is_ok()).ok_or_else(|| Error::conflict("Factorio binary version is unavailable. Configure a working binary and restart the manager before changing or checking mods"))
 }
@@ -906,7 +960,7 @@ pub async fn upload_mod(
     }
     let revision = expected(request.headers())?.to_owned();
     let temporary = receive_archive(&app.directory, request.into_body()).await?;
-    let result = mutation(&app, move |app, engine| {
+    let result = mod_mutation(&app, move |app, engine| {
         install_file(
             &app,
             &revision,

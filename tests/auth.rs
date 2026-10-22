@@ -132,13 +132,40 @@ async fn sign_in(
     assert!(
         cookie.contains("HttpOnly")
             && cookie.contains("SameSite=Strict")
-            && cookie.contains("Max-Age=28800")
+            && cookie.contains("Max-Age=2592000")
     );
     Ok(cookie
         .split(';')
         .next()
         .ok_or("Missing session cookie")?
         .to_owned())
+}
+
+#[tokio::test]
+async fn configured_lifetime_controls_cookie_and_server_expiry() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    auth::bootstrap_admin(temp.path(), "owner", PASSWORD).map_err(|e| e.message)?;
+    let auth =
+        Auth::load_with_session_ttl(temp.path(), None, None, Some("1")).map_err(|e| e.message)?;
+    let router = app(auth);
+    let before = now();
+    let login = local(
+        &router,
+        Method::POST,
+        "/api/auth/login",
+        None,
+        Some(json!({"username":"owner","password":PASSWORD})),
+    )
+    .await?;
+    assert_eq!(login.status, StatusCode::OK);
+    let expiry = login.body["expires_at"].as_u64().ok_or("Missing expiry")?;
+    assert!((before + 1..=now() + 1).contains(&expiry));
+    let cookie = login.cookie.ok_or("Missing cookie")?;
+    assert!(cookie.split(';').any(|part| part.trim() == "Max-Age=1"));
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let reply = local(&router, Method::GET, "/api/status", Some(&cookie), None).await?;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    Ok(())
 }
 
 #[tokio::test]
@@ -333,7 +360,9 @@ async fn session_authentication_logout_and_restart_revoke_access() -> TestResult
             .status,
         StatusCode::UNAUTHORIZED
     );
+    let before_login = now();
     let cookie = sign_in(&router, "owner", PASSWORD).await?;
+    let after_login = now();
     let status = local(
         &router,
         Method::GET,
@@ -344,9 +373,9 @@ async fn session_authentication_logout_and_restart_revoke_access() -> TestResult
     .await?;
     assert_eq!(status.body["user"]["role"], "admin");
     assert!(
-        status.body["expires_at"]
-            .as_u64()
-            .is_some_and(|expiry| expiry > now() && expiry <= now() + 28800)
+        status.body["expires_at"].as_u64().is_some_and(
+            |expiry| expiry >= before_login + 2592000 && expiry <= after_login + 2592000
+        )
     );
     assert_eq!(
         local(&router, Method::GET, "/api/status", Some(&cookie), None)

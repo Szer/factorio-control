@@ -11,6 +11,7 @@ services:
       FC_BIND: 0.0.0.0:8080
       FC_PUBLIC_URL: ${FC_PUBLIC_URL:-}
       FC_TRUSTED_PROXIES: ${FC_TRUSTED_PROXIES:-}
+      FC_SESSION_TTL_SECONDS: ${FC_SESSION_TTL_SECONDS:-2592000}
     read_only: true
     tmpfs:
       - /tmp

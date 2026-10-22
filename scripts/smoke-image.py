@@ -132,7 +132,7 @@ http.server.ThreadingHTTPServer(('0.0.0.0', 8081), Proxy).serve_forever()
         proxy_ip = json.loads(command("inspect", proxy).stdout)[0]["NetworkSettings"]["Networks"][network]["IPAddress"]
         require(proxy_ip, "Isolated reverse proxy has no transport address")
     mount = volume + ":/data" + (":U" if engine[-1] == "podman" else "")
-    environment = [] if direct_http else ["-e", "FC_PUBLIC_URL=" + origin, "-e", "FC_TRUSTED_PROXIES=" + proxy_ip]
+    environment = ["-e", "FC_SESSION_TTL_SECONDS=3600"] if direct_http else ["-e", "FC_PUBLIC_URL=" + origin, "-e", "FC_TRUSTED_PROXIES=" + proxy_ip]
     command(
         "run", "-d", "--name", name, "--network", network, "--network-alias", "control", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
@@ -152,6 +152,9 @@ http.server.ThreadingHTTPServer(('0.0.0.0', 8081), Proxy).serve_forever()
     status, headers, account = request("/api/auth/login", credentials, authenticated=False)
     require(status == 200 and account["user"]["must_change_password"], "Temporary account was not restricted")
     session_cookie = headers.get("set-cookie", headers.get("Set-Cookie", ""))
+    lifetime = 3600 if direct_http else 2592000
+    require(f"Max-Age={lifetime}" in session_cookie, "Session cookie lifetime differs from configuration")
+    require(abs(account["expires_at"] - time.time() - lifetime) < 10, "Server session lifetime differs from configuration")
     require(("Secure" in session_cookie) == (not direct_http) and "HttpOnly" in session_cookie and "SameSite=Strict" in session_cookie, "Session cookie protections do not match the configured scheme")
     cookie = session_cookie.split(";", 1)[0]
     require(request("/api/status")[0] == 403, "Temporary account accessed game controls")

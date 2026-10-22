@@ -602,7 +602,9 @@ fn commit_staged(
         recover(app)?;
         return Err(error);
     }
-    list(app)
+    let after = list(app)?;
+    record_mod_activity(app, &document.mods, &after.mods);
+    Ok(after)
 }
 pub fn routes() -> Router<App> {
     Router::new()
@@ -919,7 +921,7 @@ pub async fn import_list(
     input: std::result::Result<Json<ListDocument>, JsonRejection>,
 ) -> Result<Json<ModsDocument>> {
     let input = json(input)?;
-    mutation(&app, move |app, engine| {
+    mod_mutation(&app, move |app, engine| {
         recover(&app)?;
         current(&app, &input.revision)?;
         let requested = ModList {
@@ -938,9 +940,10 @@ pub async fn import_list(
         let (list, candidates) = selection(&app, &requested)?;
         validate_selection(&app, &list, &candidates, checked_engine(engine.as_deref())?)?;
         write_activation(&app, &list, None)?;
-        Ok(Json(list_mods(&app)?))
+        list_mods(&app)
     })
     .await
+    .map(Json)
 }
 fn list_mods(app: &App) -> Result<ModsDocument> {
     super::list(app)
@@ -1075,7 +1078,7 @@ pub async fn restore_pack(
     input: std::result::Result<Json<RestorePackRequest>, JsonRejection>,
 ) -> Result<Json<ModsDocument>> {
     let input = json(input)?;
-    mutation(&app, move |app, engine| {
+    mod_mutation(&app, move |app, engine| {
         recover(&app)?;
         current(&app, &input.revision)?;
         let pack = expected_pack(&app, &name, &input.pack_revision)?;
@@ -1128,9 +1131,10 @@ pub async fn restore_pack(
             recover(&app)?;
             return Err(error);
         }
-        Ok(Json(list_mods(&app)?))
+        list_mods(&app)
     })
     .await
+    .map(Json)
 }
 fn safe_archive_name(value: &str) -> bool {
     value.ends_with(".zip")
@@ -1157,7 +1161,7 @@ pub async fn remove_mod(
     Path(name): Path<String>,
     Query(query): Query<RevisionQuery>,
 ) -> Result<Json<ModsDocument>> {
-    mutation(&app, move |app, engine| {
+    mod_mutation(&app, move |app, engine| {
         recover(&app)?;
         let document = current(&app, &query.revision)?;
         if !valid_name(&name)
@@ -1219,9 +1223,10 @@ pub async fn remove_mod(
             recover(&app)?;
             return Err(error);
         }
-        Ok(Json(list_mods(&app)?))
+        list_mods(&app)
     })
     .await
+    .map(Json)
 }
 #[utoipa::path(get,path="/api/mods/export",responses((status=200,content_type="application/zip")))]
 pub async fn export_all(State(app): State<App>) -> Result<Response> {
@@ -1427,6 +1432,23 @@ mod tests {
             "2.1.23",
         )?;
         assert_eq!(result.mods.len(), 2);
+        let events = app
+            .inner
+            .blocking_lock()
+            .telemetry
+            .snapshot(false, 2)
+            .activity;
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].kind,
+            crate::telemetry::ActivityKind::ModAdded
+        ));
+        assert_eq!(events[0].message, "beta 1.0.0");
+        assert!(matches!(
+            events[1].kind,
+            crate::telemetry::ActivityKind::ModUpdated
+        ));
+        assert_eq!(events[1].message, "alpha: 1.0.0 → 2.0.0");
         assert!(
             result
                 .mods
@@ -1457,6 +1479,14 @@ mod tests {
         assert_eq!(list(&app)?.revision, revision);
         assert!(!directory(&app)?.join("alpha_2.0.0.zip").exists());
         assert!(!journal_path(&app).exists());
+        assert!(
+            app.inner
+                .blocking_lock()
+                .telemetry
+                .snapshot(false, 2)
+                .activity
+                .is_empty()
+        );
         Ok(())
     }
     #[tokio::test]

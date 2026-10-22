@@ -827,7 +827,7 @@ export interface components {
             timestamp: number;
         };
         /** @enum {string} */
-        ActivityKind: "started" | "stopped" | "joined" | "left" | "research_finished";
+        ActivityKind: "started" | "stopped" | "joined" | "left" | "research_finished" | "mod_added" | "mod_updated" | "mod_removed";
         AdminsDocument: {
             admins: string[];
             revision: string;
