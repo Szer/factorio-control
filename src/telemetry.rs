@@ -44,6 +44,9 @@ pub enum ActivityKind {
     Joined,
     Left,
     ResearchFinished,
+    ModAdded,
+    ModUpdated,
+    ModRemoved,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Activity {

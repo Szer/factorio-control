@@ -519,6 +519,7 @@ async fn apply_impl(
     blocking(move || {
         let _guard = storage_guard;
         workflows::ensure_consistent(&app)?;
+        let before = list(&app)?;
         let (fresh, mut archives, old) = build_plan(&app, &name, &plan.engine_version)?;
         if fresh.revision != plan.revision {
             return Err(Error::conflict(
@@ -588,7 +589,9 @@ async fn apply_impl(
             workflows::ensure_consistent(&app)?;
             return Err(error);
         }
-        Ok(Json(list(&app)?))
+        let after = list(&app)?;
+        record_mod_activity(&app, &before.mods, &after.mods);
+        Ok(Json(after))
     })
     .await
 }
@@ -684,6 +687,13 @@ mod tests {
             String::from_utf8_lossy(&bytes)
         );
         let result: ModsDocument = serde_json::from_slice(&bytes)?;
+        let events = app.inner.lock().await.telemetry.snapshot(false, 2).activity;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].kind,
+            crate::telemetry::ActivityKind::ModUpdated
+        ));
+        assert_eq!(events[0].message, "demo: 2.0.0 → 1.0.0");
         assert!(
             result
                 .mods

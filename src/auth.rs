@@ -24,7 +24,7 @@ use tokio::sync::{Mutex, Semaphore};
 use utoipa::ToSchema;
 
 const COOKIE: &str = "fc_session";
-const SESSION_SECONDS: u64 = 8 * 60 * 60;
+const DEFAULT_SESSION_SECONDS: u32 = 30 * 24 * 60 * 60;
 const MAX_ACCOUNTS: usize = 100;
 const MAX_SESSIONS: usize = 1000;
 const MAX_RATE_KEYS: usize = 1024;
@@ -138,6 +138,7 @@ pub struct Auth {
     path: PathBuf,
     public_origin: Option<url::Url>,
     trusted_proxies: Vec<IpAddr>,
+    session_seconds: u64,
     inner: Arc<Mutex<Runtime>>,
     password_slots: Arc<Semaphore>,
     dummy_hash: Arc<str>,
@@ -397,6 +398,25 @@ impl Auth {
         public_url: Option<&str>,
         trusted_proxies: Option<&str>,
     ) -> Result<Self> {
+        Self::load_with_session_ttl(directory, public_url, trusted_proxies, None)
+    }
+
+    pub fn load_with_session_ttl(
+        directory: &Path,
+        public_url: Option<&str>,
+        trusted_proxies: Option<&str>,
+        session_ttl_seconds: Option<&str>,
+    ) -> Result<Self> {
+        let session_seconds = match session_ttl_seconds {
+            None => DEFAULT_SESSION_SECONDS,
+            Some(value) => value
+                .parse::<u32>()
+                .ok()
+                .filter(|seconds| *seconds > 0)
+                .ok_or_else(|| {
+                    Error::bad("FC_SESSION_TTL_SECONDS must be a positive 32-bit integer")
+                })?,
+        };
         let trusted_proxies = parse_trusted_proxies(trusted_proxies)?;
         storage::ensure_directory(directory)?;
         let public_origin = public_url.filter(|value| !value.trim().is_empty()).map(|value| {
@@ -422,6 +442,7 @@ impl Auth {
             path,
             public_origin,
             trusted_proxies,
+            session_seconds: u64::from(session_seconds),
             inner: Arc::new(Mutex::new(Runtime {
                 revision,
                 accounts,
@@ -930,7 +951,7 @@ pub async fn login(
         )
     })?;
     let token = hex(&token);
-    let expires_at = crate::now().saturating_add(SESSION_SECONDS);
+    let expires_at = crate::now().saturating_add(auth.session_seconds);
     runtime.sessions.insert(
         token_key(&token),
         Session {
@@ -943,9 +964,10 @@ pub async fn login(
         expires_at: Some(expires_at),
     })
     .into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, auth.cookie(&token, SESSION_SECONDS)?);
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        auth.cookie(&token, auth.session_seconds)?,
+    );
     Ok(response)
 }
 

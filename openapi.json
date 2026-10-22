@@ -2333,7 +2333,10 @@
           "stopped",
           "joined",
           "left",
-          "research_finished"
+          "research_finished",
+          "mod_added",
+          "mod_updated",
+          "mod_removed"
         ]
       },
       "AdminsDocument": {

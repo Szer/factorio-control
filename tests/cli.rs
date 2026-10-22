@@ -6,6 +6,28 @@ use std::{
 };
 
 #[test]
+fn invalid_session_lifetimes_fail_startup_without_bootstrapping_accounts()
+-> Result<(), Box<dyn std::error::Error>> {
+    for value in ["", "0", "-1", "1.5", "30days", "4294967296"] {
+        let temporary = tempfile::tempdir()?;
+        let data = temporary.path().join("data");
+        let output = Command::new(env!("CARGO_BIN_EXE_factorio-control"))
+            .env("FC_DATA_DIR", &data)
+            .env("FC_BIND", "127.0.0.1:0")
+            .env("FC_SESSION_TTL_SECONDS", value)
+            .env_remove("FC_PUBLIC_URL")
+            .env_remove("FC_TRUSTED_PROXIES")
+            .env_remove("FC_FACTORIO_BIN")
+            .output()?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("FC_SESSION_TTL_SECONDS"));
+        assert!(!data.join("panel-accounts.json").exists());
+        assert!(!data.join("bootstrap-admin.json").exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn offline_health_check_fails_without_creating_data() -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
     let data = temporary.path().join("data");
@@ -14,6 +36,7 @@ fn offline_health_check_fails_without_creating_data() -> Result<(), Box<dyn std:
         .env("FC_BIND", "127.0.0.1:0")
         .env("FC_DATA_DIR", &data)
         .env_remove("FC_PUBLIC_URL")
+        .env_remove("FC_SESSION_TTL_SECONDS")
         .output()?;
     assert!(!output.status.success());
     assert!(!data.exists());
@@ -31,6 +54,7 @@ fn bootstrap_creates_a_fresh_data_directory_and_never_overwrites_accounts()
             .env("FC_DATA_DIR", &data)
             .env("FC_BIND", "127.0.0.1:0")
             .env_remove("FC_PUBLIC_URL")
+            .env_remove("FC_SESSION_TTL_SECONDS")
             .env_remove("FC_FACTORIO_BIN")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -61,6 +85,7 @@ fn first_start_bootstraps_without_printing_the_password() -> Result<(), Box<dyn 
         .env("FC_DATA_DIR", &data)
         .env("FC_BIND", "127.0.0.1:0")
         .env_remove("FC_PUBLIC_URL")
+        .env_remove("FC_SESSION_TTL_SECONDS")
         .env_remove("FC_FACTORIO_BIN")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -102,6 +127,7 @@ fn empty_optional_trusted_proxies_allow_main_to_listen() -> Result<(), Box<dyn s
             .env("FC_BIND", bind)
             .env("FC_TRUSTED_PROXIES", value)
             .env("FC_PUBLIC_URL", value)
+            .env_remove("FC_SESSION_TTL_SECONDS")
             .env_remove("FC_FACTORIO_BIN")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

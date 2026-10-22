@@ -1,3 +1,4 @@
+import { expireSessionAt } from "../sessionExpiry";
 import { useSessionMutation } from "../useSessionMutation";
 import { Activity, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -192,15 +193,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
     if (identity === null || expiresAt === null || expiresAt === undefined)
       return;
     const epoch = captureAuthEpoch();
-    const timer = window.setTimeout(
-      () => {
-        authExpired(epoch);
-      },
-      Math.min(Math.max(0, expiresAt * 1000 - Date.now()), 2_147_483_647),
-    );
-    return () => {
-      window.clearTimeout(timer);
-    };
+    return expireSessionAt(expiresAt, () => {
+      authExpired(epoch);
+    });
   }, [identity, expiresAt]);
   const authenticated = identity !== null && identity === retainedIdentity;
   const suspended = retained !== null && !authenticated;

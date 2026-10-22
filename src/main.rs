@@ -80,12 +80,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|_| "FC_TRUSTED_PROXIES must contain UTF-8 IP addresses")
         })
         .transpose()?;
-    let authentication = auth::Auth::load_with_trusted_proxies(
+    let session_ttl_seconds = std::env::var_os("FC_SESSION_TTL_SECONDS")
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| "FC_SESSION_TTL_SECONDS must be UTF-8")
+        })
+        .transpose()?;
+    let authentication = auth::Auth::load_with_session_ttl(
         &app.directory,
         public_url.as_deref(),
         trusted_proxies
             .as_deref()
             .filter(|value| !value.trim().is_empty()),
+        session_ttl_seconds.as_deref(),
     )
     .map_err(|error| error.message)?;
     authentication

@@ -44,7 +44,7 @@ The persistent `factory-data` volume holds saves, mods, settings, panel accounts
 
 ## Overview and telemetry
 
-Overview shows server state and its start time, online players, research progress, recent activity, and UPS history. Manager settings control the polling interval and history duration.
+Overview shows server state and its start time, online players, research progress, recent activity (including installed mod additions, version changes and removals), and UPS history. Manager settings control the polling interval and history duration.
 
 Detailed telemetry is opt-in: enable it in **Settings → Manager settings**. It uses Factorio script commands through private loopback RCON, which disable achievements for that save. Without it, lifecycle and player events remain available from game logs.
 
@@ -103,7 +103,7 @@ Use at least 12 characters for your replacement password. Panel accounts are sep
 
 For a reverse proxy, configure `FC_TRUSTED_PROXIES` with its exact IP addresses as seen by Control; restrict ingress to those proxies and have the proxy replace or append the real client address in `X-Forwarded-For`. Only configured transport peers can supply forwarded addresses. Without configured proxy trust, forwarded headers are ignored and clients sharing a proxy or NAT share one rate bucket. Do not guess a Docker gateway address. See [Dockge proxy configuration](docs/dockge.md).
 
-Set `FC_PUBLIC_URL` to the exact browser-facing HTTP or HTTPS origin when using a non-loopback hostname, for example `http://192.0.2.10:8181` or `https://factorio.example.com`. Leave it empty for localhost access. Preserve its Host header through a proxy; forwarded headers do not expand trusted origins. Session cookies are HttpOnly and SameSite=Strict, with Secure enabled for a configured HTTPS origin. Sessions expire and must be re-established after manager restarts.
+Set `FC_PUBLIC_URL` to the exact browser-facing HTTP or HTTPS origin when using a non-loopback hostname, for example `http://192.0.2.10:8181` or `https://factorio.example.com`. Leave it empty for localhost access. Preserve its Host header through a proxy; forwarded headers do not expand trusted origins. Session cookies are HttpOnly and SameSite=Strict, with Secure enabled for a configured HTTPS origin. Sessions expire 30 days after sign-in by default. Set `FC_SESSION_TTL_SECONDS` to a positive integer from 1 to 4294967295 to change both the server lifetime and cookie Max-Age. Activity does not extend the deadline; manager restarts require signing in again.
 
 Keep `panel-accounts.json` and the data directory private. Back them up before moving installations. Choose your permanent password during first sign-in. Do not share or retain the bootstrap credential file.
 
