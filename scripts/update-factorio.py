@@ -14,8 +14,9 @@ def release(version):
     if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
         raise ValueError("Expected a numeric Factorio version such as 2.1.23")
     url = f"https://factorio.com/get-download/{version}/headless/linux64"
+    request = urllib.request.Request(url, headers={"User-Agent": "Factorio-Control-release-updater/1.0 (+https://github.com/Szer/factorio-control)"})
     digest = hashlib.sha256()
-    with urllib.request.urlopen(url, timeout=60) as response:
+    with urllib.request.urlopen(request, timeout=60) as response:
         if urllib.parse.urlsplit(response.url).scheme != "https":
             raise ValueError("The game download must use HTTPS")
         size = 0

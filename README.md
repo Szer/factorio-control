@@ -34,7 +34,7 @@ Read the initial administrator password with `docker compose exec control cat /d
 
 `CONTROL_IMAGE` accepts a release tag or `ghcr.io/szer/factorio-control@sha256:...`. CI publishes `latest`, `factorio-<game-version>` and `sha-<full-commit>` after checks pass; `v*` Git tags publish version tags. Pin a digest for deployments; `latest` and the game-version alias move as Control changes.
 
-To bump the bundled game, run `python3 scripts/update-factorio.py 2.1.23` with the desired version, review and commit `.factorio-version` and `.factorio-sha256`, then push to `main`. Image builds verify the pinned archive checksum before extraction. To build locally:
+To bump the bundled game, run `python3 scripts/update-factorio.py 2.1.24` with the desired version, review and commit `.factorio-version` and `.factorio-sha256`, then push to `main`. Image builds verify the pinned archive checksum before extraction. To build locally:
 
 ```sh
 docker compose -f compose.yaml -f compose.build.yaml up --build -d

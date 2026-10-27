@@ -25,8 +25,11 @@ class ReleaseTests(unittest.TestCase):
 
     def test_streamed_release_hash_and_empty_download(self):
         body = b"fixture archive" * 200000
-        with patch.object(update.urllib.request, "urlopen", return_value=Response(body)):
+        with patch.object(update.urllib.request, "urlopen", return_value=Response(body)) as request:
             self.assertEqual(update.release("2.1.23"), hashlib.sha256(body).hexdigest())
+            outgoing = request.call_args.args[0]
+            self.assertEqual(outgoing.full_url, "https://factorio.com/get-download/2.1.23/headless/linux64")
+            self.assertIn("Factorio-Control", outgoing.get_header("User-agent"))
         with patch.object(update.urllib.request, "urlopen", return_value=Response()):
             with self.assertRaises(ValueError):
                 update.release("2.1.23")
