@@ -351,7 +351,7 @@ async fn password_hashes_are_private_and_bootstrap_cannot_overwrite() -> TestRes
 }
 
 #[tokio::test]
-async fn session_authentication_logout_and_restart_revoke_access() -> TestResult {
+async fn sessions_survive_restart_with_original_expiry_and_logout_stays_revoked() -> TestResult {
     let temp = tempfile::tempdir()?;
     let router = app(configured(temp.path(), None).map_err(|e| e.message)?);
     assert_eq!(
@@ -383,13 +383,25 @@ async fn session_authentication_logout_and_restart_revoke_access() -> TestResult
             .status,
         StatusCode::OK
     );
-    let restarted = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
+    drop(router);
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
     assert_eq!(
-        local(&restarted, Method::GET, "/api/status", Some(&cookie), None)
+        local(&router, Method::GET, "/api/status", Some(&cookie), None)
             .await?
             .status,
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
+    let resumed = local(
+        &router,
+        Method::GET,
+        "/api/auth/status",
+        Some(&cookie),
+        None,
+    )
+    .await?;
+    assert_eq!(resumed.body, status.body);
+    assert!(resumed.cookie.is_none());
+
     let logout = local(
         &router,
         Method::POST,
@@ -410,6 +422,15 @@ async fn session_authentication_logout_and_restart_revoke_access() -> TestResult
             .status,
         StatusCode::UNAUTHORIZED
     );
+    drop(router);
+    let restarted = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
+    assert_eq!(
+        local(&restarted, Method::GET, "/api/status", Some(&cookie), None)
+            .await?
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+
     Ok(())
 }
 
@@ -666,6 +687,7 @@ async fn account_revision_role_changes_and_deletion_revoke_sessions() -> TestRes
     assert_eq!(stale.status, StatusCode::CONFLICT);
     let update = local(&router, Method::POST, "/api/auth/accounts/update", Some(&owner), Some(json!({"revision":create.body["revision"],"username":"reader","password":null,"role":"operator"}))).await?;
     assert_eq!(update.status, StatusCode::OK);
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
     assert_eq!(
         local(&router, Method::GET, "/api/status", Some(&reader), None)
             .await?
@@ -694,6 +716,7 @@ async fn account_revision_role_changes_and_deletion_revoke_sessions() -> TestRes
     )
     .await?;
     assert_eq!(delete.status, StatusCode::OK);
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
     assert_eq!(
         local(&router, Method::GET, "/api/status", Some(&operator), None)
             .await?
@@ -760,6 +783,7 @@ async fn password_changes_revoke_all_sessions_and_require_current_password() -> 
     )
     .await?;
     assert_eq!(changed.status, StatusCode::NO_CONTENT);
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
     for cookie in [first, second] {
         assert_eq!(
             local(&router, Method::GET, "/api/status", Some(&cookie), None)
@@ -1096,6 +1120,7 @@ async fn account_identity_survives_updates_and_changes_on_recreation() -> TestRe
             .to_owned())
     };
     let original = identity(&created.body)?;
+    let player_cookie = sign_in(&router, "player", PASSWORD).await?;
     let updated = local(&router, Method::POST, "/api/auth/accounts/update", Some(&cookie), Some(json!({
         "revision":created.body["revision"], "username":"player", "password":"another-fixture-password", "role":"operator"
     }))).await?;
@@ -1117,6 +1142,20 @@ async fn account_identity_survives_updates_and_changes_on_recreation() -> TestRe
     }))).await?;
     assert_eq!(recreated.status, StatusCode::OK);
     assert_ne!(identity(&recreated.body)?, original);
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
+    assert_eq!(
+        local(
+            &router,
+            Method::GET,
+            "/api/status",
+            Some(&player_cookie),
+            None
+        )
+        .await?
+        .status,
+        StatusCode::UNAUTHORIZED
+    );
+
     Ok(())
 }
 
@@ -1244,5 +1283,183 @@ async fn configured_http_origin_authenticates_without_tls_or_proxy_trust() -> Te
         .status,
         StatusCode::OK
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_sessions_persist_privately_without_bearer_tokens_or_revision_changes()
+-> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let router = app(configured(temp.path(), None).map_err(|e| e.message)?);
+    let accounts_before = std::fs::read(temp.path().join("panel-accounts.json"))?;
+    let (first, second) = tokio::join!(
+        sign_in(&router, "owner", PASSWORD),
+        sign_in(&router, "owner", PASSWORD)
+    );
+    let cookies = [first?, second?];
+    let path = temp.path().join("panel-sessions.json");
+    assert_eq!(
+        std::fs::metadata(&path)?.permissions().mode() & 0o777,
+        0o600
+    );
+    let bytes = std::fs::read_to_string(&path)?;
+    assert!(!bytes.contains(PASSWORD));
+    for cookie in &cookies {
+        let token = cookie
+            .strip_prefix("fc_session=")
+            .ok_or("Missing cookie token")?;
+        assert!(!bytes.contains(token));
+    }
+    assert!(std::fs::read(temp.path().join("panel-accounts.json"))? == accounts_before);
+    drop(router);
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
+    for cookie in &cookies {
+        assert_eq!(
+            local(&router, Method::GET, "/api/status", Some(cookie), None)
+                .await?
+                .status,
+            StatusCode::OK
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_and_longer_ttl_do_not_renew_an_existing_session() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let router = app(configured(temp.path(), None).map_err(|e| e.message)?);
+    let cookie = sign_in(&router, "owner", PASSWORD).await?;
+    let before = local(
+        &router,
+        Method::GET,
+        "/api/auth/status",
+        Some(&cookie),
+        None,
+    )
+    .await?
+    .body;
+    drop(router);
+    let router = app(
+        Auth::load_with_session_ttl(temp.path(), None, None, Some("4294967295"))
+            .map_err(|e| e.message)?,
+    );
+    let after = local(
+        &router,
+        Method::GET,
+        "/api/auth/status",
+        Some(&cookie),
+        None,
+    )
+    .await?
+    .body;
+    assert_eq!(before, after);
+    drop(router);
+    let path = temp.path().join("panel-sessions.json");
+    let mut stored: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    for session in stored["sessions"]
+        .as_object_mut()
+        .ok_or("Missing fixture sessions")?
+        .values_mut()
+    {
+        session["expires_at"] = json!(now().saturating_sub(1));
+    }
+    std::fs::write(&path, serde_json::to_vec(&stored)?)?;
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
+    assert_eq!(
+        local(&router, Method::GET, "/api/status", Some(&cookie), None)
+            .await?
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    let stored: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    assert!(
+        stored["sessions"]
+            .as_object()
+            .is_some_and(|sessions| sessions.is_empty())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_account_edits_revoke_persisted_sessions_even_after_restart() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let router = app(configured(temp.path(), None).map_err(|e| e.message)?);
+    let cookie = sign_in(&router, "owner", PASSWORD).await?;
+    drop(router);
+    let path = temp.path().join("panel-accounts.json");
+    let original = std::fs::read(&path)?;
+    let mut changed = original.clone();
+    changed.push(b'\n');
+    std::fs::write(&path, changed)?;
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
+    assert_eq!(
+        local(&router, Method::GET, "/api/status", Some(&cookie), None)
+            .await?
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    drop(router);
+    std::fs::write(&path, original)?;
+    let router = app(Auth::load(temp.path(), None).map_err(|e| e.message)?);
+    assert_eq!(
+        local(&router, Method::GET, "/api/status", Some(&cookie), None)
+            .await?
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_session_storage_disables_access_without_replacing_working_files() -> TestResult {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let temp = tempfile::tempdir()?;
+    let router = app(configured(temp.path(), None).map_err(|e| e.message)?);
+    let cookie = sign_in(&router, "owner", PASSWORD).await?;
+    let path = temp.path().join("panel-sessions.json");
+    let original = std::fs::read(&path)?;
+    std::fs::write(&path, b"invalid-json")?;
+    assert!(Auth::load(temp.path(), None).is_err());
+    assert_ne!(
+        local(&router, Method::GET, "/api/status", Some(&cookie), None)
+            .await?
+            .status,
+        StatusCode::OK
+    );
+    assert!(std::fs::read(&path)? == b"invalid-json");
+    std::fs::write(&path, &original)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+    assert!(Auth::load(temp.path(), None).is_err());
+    assert_eq!(
+        local(&router, Method::GET, "/api/status", Some(&cookie), None)
+            .await?
+            .status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&path, temp.path().join("session-fixture.json"))?;
+    symlink(temp.path().join("session-fixture.json"), &path)?;
+    assert!(Auth::load(temp.path(), None).is_err());
+    assert_ne!(
+        local(&router, Method::GET, "/api/status", Some(&cookie), None)
+            .await?
+            .status,
+        StatusCode::OK
+    );
+    assert!(std::fs::read(temp.path().join("session-fixture.json"))? == original);
+    std::fs::remove_file(&path)?;
+    std::fs::create_dir(&path)?;
+    let login = local(
+        &router,
+        Method::POST,
+        "/api/auth/login",
+        None,
+        Some(json!({"username":"owner", "password":PASSWORD})),
+    )
+    .await?;
+    assert_ne!(login.status, StatusCode::OK);
+    assert!(login.cookie.is_none());
+    assert!(Auth::load(temp.path(), None).is_err());
     Ok(())
 }

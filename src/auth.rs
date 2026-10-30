@@ -114,17 +114,29 @@ struct BootstrapCredentials {
 struct StoredAccounts {
     accounts: Vec<StoredAccount>,
 }
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Session {
+    account_id: String,
     username: String,
     expires_at: u64,
 }
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSessions {
+    accounts_revision: String,
+    sessions: HashMap<String, Session>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ClientIp(IpAddr);
 
+#[derive(Clone)]
 struct Attempts {
     count: u32,
     started: Instant,
 }
+#[derive(Clone)]
 struct Runtime {
     revision: String,
     accounts: Vec<StoredAccount>,
@@ -136,6 +148,8 @@ struct Runtime {
 #[derive(Clone)]
 pub struct Auth {
     path: PathBuf,
+    sessions_path: PathBuf,
+    operation: Arc<Mutex<()>>,
     public_origin: Option<url::Url>,
     trusted_proxies: Vec<IpAddr>,
     session_seconds: u64,
@@ -388,6 +402,74 @@ fn initialize_accounts(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+fn write_sessions(path: &Path, revision: &str, sessions: &HashMap<String, Session>) -> Result<()> {
+    storage::atomic_write(
+        path,
+        &serde_json::to_vec(&StoredSessions {
+            accounts_revision: revision.to_owned(),
+            sessions: sessions.clone(),
+        })?,
+        true,
+    )
+}
+
+fn read_sessions(
+    path: &Path,
+    revision: &str,
+    accounts: &[StoredAccount],
+) -> Result<HashMap<String, Session>> {
+    let (_, bytes) = storage::read_document(path)?;
+    if let Some(bytes) = bytes {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
+            return Err(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Panel session file must be private (mode 0600)",
+            ));
+        }
+        let mut stored: StoredSessions = serde_json::from_slice(&bytes).map_err(|_| {
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Invalid panel session file",
+            )
+        })?;
+        if stored.sessions.len() > MAX_SESSIONS
+            || stored.sessions.iter().any(|(key, session)| {
+                key.len() != 64
+                    || !key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || session.account_id.len() != 64
+                    || !session
+                        .account_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                    || validate_username(&session.username).is_err()
+            })
+        {
+            return Err(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Invalid panel session file",
+            ));
+        }
+        let count = stored.sessions.len();
+        if stored.accounts_revision != revision {
+            stored.sessions.clear();
+        }
+        stored.sessions.retain(|_, session| {
+            session.expires_at > crate::now()
+                && accounts.iter().any(|account| {
+                    account.account_id == session.account_id && account.username == session.username
+                })
+        });
+        if count != stored.sessions.len() || stored.accounts_revision != revision {
+            write_sessions(path, revision, &stored.sessions)?;
+        }
+        return Ok(stored.sessions);
+    }
+    let sessions = HashMap::new();
+    write_sessions(path, revision, &sessions)?;
+    Ok(sessions)
+}
+
 impl Auth {
     pub fn load(directory: &Path, public_url: Option<&str>) -> Result<Self> {
         Self::load_with_trusted_proxies(directory, public_url, None)
@@ -430,6 +512,8 @@ impl Auth {
         let path = directory.join("panel-accounts.json");
         let (revision, accounts) = migrate_account_ids(&path)?;
         remove_bootstrap_file(directory, &accounts)?;
+        let sessions_path = directory.join("panel-sessions.json");
+        let sessions = read_sessions(&sessions_path, &revision, &accounts)?;
         let mut secret = [0u8; 32];
         OsRng.try_fill_bytes(&mut secret).map_err(|_| {
             error(
@@ -440,13 +524,15 @@ impl Auth {
         let dummy_hash = hash_password(&hex(&secret))?.into();
         Ok(Self {
             path,
+            sessions_path,
+            operation: Arc::new(Mutex::new(())),
             public_origin,
             trusted_proxies,
             session_seconds: u64::from(session_seconds),
             inner: Arc::new(Mutex::new(Runtime {
                 revision,
                 accounts,
-                sessions: HashMap::new(),
+                sessions,
                 attempts: HashMap::new(),
                 login_attempts: HashMap::new(),
             })),
@@ -455,13 +541,39 @@ impl Auth {
         })
     }
 
+    async fn transaction<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&Self, &mut Runtime) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let guard = self.operation.clone().lock_owned().await;
+        let auth = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let mut runtime = auth.inner.blocking_lock().clone();
+            let result = auth
+                .refresh(&mut runtime)
+                .and_then(|()| job(&auth, &mut runtime));
+            *auth.inner.blocking_lock() = runtime;
+            result
+        })
+        .await
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Authentication service failed",
+            )
+        })?
+    }
+
     pub async fn validate_bind(&self, bind: SocketAddr) -> Result<()> {
         if !bind.ip().is_loopback() {
-            let mut runtime = self.inner.lock().await;
-            self.refresh(&mut runtime)?;
-            if runtime.accounts.is_empty() {
-                return Err(Error::bad("Nonloopback FC_BIND requires panel accounts"));
-            }
+            self.transaction(|_, runtime| {
+                if runtime.accounts.is_empty() {
+                    return Err(Error::bad("Nonloopback FC_BIND requires panel accounts"));
+                }
+                Ok(())
+            })
+            .await?;
         }
         Ok(())
     }
@@ -483,8 +595,9 @@ impl Auth {
             }
             runtime.revision = revision;
             runtime.accounts = accounts;
-            runtime.sessions.clear();
         }
+        runtime.sessions =
+            read_sessions(&self.sessions_path, &runtime.revision, &runtime.accounts)?;
         if let Some(directory) = self.path.parent() {
             remove_bootstrap_file(directory, &runtime.accounts)?;
         }
@@ -495,8 +608,15 @@ impl Auth {
         &self,
         runtime: &mut Runtime,
         accounts: Vec<StoredAccount>,
+        revoke_username: Option<&str>,
     ) -> Result<AccountsDocument> {
         let bytes = serde_json::to_vec_pretty(&StoredAccounts { accounts })?;
+        let revision = hex(&Sha256::digest(&bytes));
+        let mut sessions = runtime.sessions.clone();
+        sessions.retain(|_, session| Some(session.username.as_str()) != revoke_username);
+        // Commit revocations first so an interrupted account change cannot revive a session.
+        write_sessions(&self.sessions_path, &revision, &sessions)?;
+        runtime.sessions = sessions;
         storage::atomic_write(&self.path, &bytes, true)?;
         let (revision, accounts) = read_accounts(&self.path)?;
         runtime.revision = revision;
@@ -709,10 +829,9 @@ fn identify(runtime: &mut Runtime, headers: &HeaderMap) -> Option<(Account, u64)
         .sessions
         .retain(|_, session| session.expires_at > crate::now());
     let session = runtime.sessions.get(&token_key(request_token(headers)?))?;
-    let account = runtime
-        .accounts
-        .iter()
-        .find(|account| account.username == session.username)?;
+    let account = runtime.accounts.iter().find(|account| {
+        account.account_id == session.account_id && account.username == session.username
+    })?;
     Some((public_account(account), session.expires_at))
 }
 
@@ -758,31 +877,39 @@ pub fn permits(role: Role, method: &Method, path: &str) -> bool {
 }
 
 pub async fn guard(State(auth): State<Auth>, mut request: Request<Body>, next: Next) -> Response {
-    let result = async {
+    let result: Result<()> = async {
         auth.check_request(&request)?;
         if request.uri().path().starts_with("/api/") {
-            let mut runtime = auth.inner.lock().await;
-            auth.refresh(&mut runtime)?;
-            if !matches!(
-                (request.method(), request.uri().path()),
-                (&Method::GET, "/api/auth/status") | (&Method::POST, "/api/auth/login")
-            ) {
-                let (account, _) =
-                    identify(&mut runtime, request.headers()).ok_or_else(unauthorized)?;
-                if account.must_change_password
-                    && !matches!(
-                        (request.method(), request.uri().path()),
-                        (&Method::POST, "/api/auth/password" | "/api/auth/logout")
-                    )
-                {
-                    return Err(error(
-                        StatusCode::FORBIDDEN,
-                        "Change the temporary password before using the panel",
-                    ));
-                }
-                if !permits(account.role, request.method(), request.uri().path()) {
-                    return Err(forbidden());
-                }
+            let method = request.method().clone();
+            let path = request.uri().path().to_owned();
+            let headers = request.headers().clone();
+            let account = auth
+                .transaction(move |_, runtime| {
+                    if matches!(
+                        (&method, path.as_str()),
+                        (&Method::GET, "/api/auth/status") | (&Method::POST, "/api/auth/login")
+                    ) {
+                        return Ok(None);
+                    }
+                    let (account, _) = identify(runtime, &headers).ok_or_else(unauthorized)?;
+                    if account.must_change_password
+                        && !matches!(
+                            (&method, path.as_str()),
+                            (&Method::POST, "/api/auth/password" | "/api/auth/logout")
+                        )
+                    {
+                        return Err(error(
+                            StatusCode::FORBIDDEN,
+                            "Change the temporary password before using the panel",
+                        ));
+                    }
+                    if !permits(account.role, &method, &path) {
+                        return Err(forbidden());
+                    }
+                    Ok(Some(account))
+                })
+                .await?;
+            if let Some(account) = account {
                 request.extensions_mut().insert(account);
             }
         }
@@ -824,13 +951,14 @@ pub fn routes<S: Clone + Send + Sync + 'static>(auth: Auth) -> Router<S> {
 
 #[utoipa::path(get, path="/api/auth/status", operation_id="auth_status", responses((status=200, body=SessionStatus)))]
 pub async fn status(State(auth): State<Auth>, headers: HeaderMap) -> Result<Json<SessionStatus>> {
-    let mut runtime = auth.inner.lock().await;
-    auth.refresh(&mut runtime)?;
-    let session = identify(&mut runtime, &headers);
-    Ok(Json(SessionStatus {
-        user: session.as_ref().map(|(account, _)| account.clone()),
-        expires_at: session.map(|(_, expiry)| expiry),
-    }))
+    auth.transaction(move |_, runtime| {
+        let session = identify(runtime, &headers);
+        Ok(Json(SessionStatus {
+            user: session.as_ref().map(|(account, _)| account.clone()),
+            expires_at: session.map(|(_, expiry)| expiry),
+        }))
+    })
+    .await
 }
 
 fn rate_limit(runtime: &mut Runtime, key: &str, limit: u32, duration: Duration) -> Result<()> {
@@ -900,88 +1028,96 @@ pub async fn login(
     Json(input): Json<LoginRequest>,
 ) -> Result<Response> {
     let client = auth.client_ip(peer.map(|Extension(ConnectInfo(peer))| peer), &headers)?;
-    let hash = {
-        let mut runtime = auth.inner.lock().await;
-        auth.refresh(&mut runtime)?;
-        limit_login(&mut runtime, client)?;
-        if validate_username(&input.username).is_err() || input.password.len() > 1024 {
-            return Err(error(
-                StatusCode::UNAUTHORIZED,
-                "Invalid account name or password",
-            ));
-        }
-        runtime
-            .accounts
-            .iter()
-            .find(|account| account.username == input.username)
-            .map(|account| account.password_hash.clone())
-            .unwrap_or_else(|| auth.dummy_hash.to_string())
-    };
+    let username = input.username.clone();
+    let password_length = input.password.len();
+    let hash = auth
+        .transaction(move |auth, runtime| {
+            limit_login(runtime, client)?;
+            if validate_username(&username).is_err() || password_length > 1024 {
+                return Err(error(
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid account name or password",
+                ));
+            }
+            Ok(runtime
+                .accounts
+                .iter()
+                .find(|account| account.username == username)
+                .map(|account| account.password_hash.clone())
+                .unwrap_or_else(|| auth.dummy_hash.to_string()))
+        })
+        .await?;
     let verified_hash = hash.clone();
     let verified = password_job(&auth, move || {
         verify_password(&input.password, &verified_hash)
     })
     .await?;
-    let mut runtime = auth.inner.lock().await;
-    auth.refresh(&mut runtime)?;
-    let account = runtime
-        .accounts
-        .iter()
-        .find(|account| account.username == input.username && account.password_hash == hash)
-        .filter(|_| verified)
-        .map(public_account)
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Invalid account name or password"))?;
-    runtime
-        .sessions
-        .retain(|_, session| session.expires_at > crate::now());
-    if runtime.sessions.len() >= MAX_SESSIONS {
-        return Err(error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Session capacity reached; try again later",
-        ));
-    }
-    if let Some(token) = request_token(&headers) {
-        runtime.sessions.remove(&token_key(token));
-    }
-    let mut token = [0u8; 32];
-    OsRng.try_fill_bytes(&mut token).map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Secure randomness is unavailable",
-        )
-    })?;
-    let token = hex(&token);
-    let expires_at = crate::now().saturating_add(auth.session_seconds);
-    runtime.sessions.insert(
-        token_key(&token),
-        Session {
-            username: account.username.clone(),
-            expires_at,
-        },
-    );
-    let mut response = Json(SessionStatus {
-        user: Some(account),
-        expires_at: Some(expires_at),
+    auth.transaction(move |auth, runtime| {
+        let account = runtime
+            .accounts
+            .iter()
+            .find(|account| account.username == input.username && account.password_hash == hash)
+            .filter(|_| verified)
+            .map(public_account)
+            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Invalid account name or password"))?;
+        runtime
+            .sessions
+            .retain(|_, session| session.expires_at > crate::now());
+        if runtime.sessions.len() >= MAX_SESSIONS {
+            return Err(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Session capacity reached; try again later",
+            ));
+        }
+        if let Some(token) = request_token(&headers) {
+            runtime.sessions.remove(&token_key(token));
+        }
+        let mut token = [0u8; 32];
+        OsRng.try_fill_bytes(&mut token).map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Secure randomness is unavailable",
+            )
+        })?;
+        let token = hex(&token);
+        let expires_at = crate::now().saturating_add(auth.session_seconds);
+        runtime.sessions.insert(
+            token_key(&token),
+            Session {
+                account_id: account.account_id.clone(),
+                username: account.username.clone(),
+                expires_at,
+            },
+        );
+        write_sessions(&auth.sessions_path, &runtime.revision, &runtime.sessions)?;
+        let mut response = Json(SessionStatus {
+            user: Some(account),
+            expires_at: Some(expires_at),
+        })
+        .into_response();
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            auth.cookie(&token, auth.session_seconds)?,
+        );
+        Ok(response)
     })
-    .into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        auth.cookie(&token, auth.session_seconds)?,
-    );
-    Ok(response)
+    .await
 }
 
 #[utoipa::path(post, path="/api/auth/logout", responses((status=204)))]
 pub async fn logout(State(auth): State<Auth>, headers: HeaderMap) -> Result<Response> {
-    let mut runtime = auth.inner.lock().await;
-    if let Some(token) = request_token(&headers) {
-        runtime.sessions.remove(&token_key(token));
-    }
-    let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, auth.cookie("", 0)?);
-    Ok(response)
+    auth.transaction(move |auth, runtime| {
+        if let Some(token) = request_token(&headers) {
+            runtime.sessions.remove(&token_key(token));
+        }
+        write_sessions(&auth.sessions_path, &runtime.revision, &runtime.sessions)?;
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, auth.cookie("", 0)?);
+        Ok(response)
+    })
+    .await
 }
 
 fn require_admin(runtime: &mut Runtime, headers: &HeaderMap) -> Result<Account> {
@@ -1004,10 +1140,11 @@ pub async fn accounts(
     State(auth): State<Auth>,
     headers: HeaderMap,
 ) -> Result<Json<AccountsDocument>> {
-    let mut runtime = auth.inner.lock().await;
-    auth.refresh(&mut runtime)?;
-    require_admin(&mut runtime, &headers)?;
-    Ok(Json(accounts_document(&runtime)))
+    auth.transaction(move |_, runtime| {
+        require_admin(runtime, &headers)?;
+        Ok(Json(accounts_document(runtime)))
+    })
+    .await
 }
 async fn protected_hash(auth: &Auth, password: String) -> Result<String> {
     validate_password(&password)?;
@@ -1042,36 +1179,38 @@ pub async fn create_account(
     Json(input): Json<CreateAccount>,
 ) -> Result<Json<AccountsDocument>> {
     validate_username(&input.username)?;
-    {
-        let mut runtime = auth.inner.lock().await;
-        auth.refresh(&mut runtime)?;
-        require_admin(&mut runtime, &headers)?;
-        check_revision(&runtime, &input.revision)?;
-    }
+    let checked_headers = headers.clone();
+    let checked_revision = input.revision.clone();
+    auth.transaction(move |_, runtime| {
+        require_admin(runtime, &checked_headers)?;
+        check_revision(runtime, &checked_revision)
+    })
+    .await?;
     let password_hash = protected_hash(&auth, input.password).await?;
-    let mut runtime = auth.inner.lock().await;
-    auth.refresh(&mut runtime)?;
-    require_admin(&mut runtime, &headers)?;
-    check_revision(&runtime, &input.revision)?;
-    if runtime.accounts.len() >= MAX_ACCOUNTS
-        || runtime
-            .accounts
-            .iter()
-            .any(|account| account.username == input.username)
-    {
-        return Err(Error::conflict(
-            "Account already exists or account limit reached",
-        ));
-    }
-    let mut accounts = runtime.accounts.clone();
-    accounts.push(StoredAccount {
-        account_id: new_account_id()?,
-        username: input.username,
-        role: input.role,
-        password_hash,
-        must_change_password: false,
-    });
-    Ok(Json(auth.write_accounts(&mut runtime, accounts)?))
+    auth.transaction(move |auth, runtime| {
+        require_admin(runtime, &headers)?;
+        check_revision(runtime, &input.revision)?;
+        if runtime.accounts.len() >= MAX_ACCOUNTS
+            || runtime
+                .accounts
+                .iter()
+                .any(|account| account.username == input.username)
+        {
+            return Err(Error::conflict(
+                "Account already exists or account limit reached",
+            ));
+        }
+        let mut accounts = runtime.accounts.clone();
+        accounts.push(StoredAccount {
+            account_id: new_account_id()?,
+            username: input.username,
+            role: input.role,
+            password_hash,
+            must_change_password: false,
+        });
+        Ok(Json(auth.write_accounts(runtime, accounts, None)?))
+    })
+    .await
 }
 
 #[utoipa::path(post, path="/api/auth/accounts/update", request_body=UpdateAccount, responses((status=200, body=AccountsDocument)))]
@@ -1080,44 +1219,43 @@ pub async fn update_account(
     headers: HeaderMap,
     Json(input): Json<UpdateAccount>,
 ) -> Result<Json<AccountsDocument>> {
-    {
-        let mut runtime = auth.inner.lock().await;
-        auth.refresh(&mut runtime)?;
-        require_admin(&mut runtime, &headers)?;
-        check_revision(&runtime, &input.revision)?;
-    }
+    let checked_headers = headers.clone();
+    let checked_revision = input.revision.clone();
+    auth.transaction(move |_, runtime| {
+        require_admin(runtime, &checked_headers)?;
+        check_revision(runtime, &checked_revision)
+    })
+    .await?;
     let password_hash = match input.password {
         Some(password) => Some(protected_hash(&auth, password).await?),
         None => None,
     };
-    let mut runtime = auth.inner.lock().await;
-    auth.refresh(&mut runtime)?;
-    require_admin(&mut runtime, &headers)?;
-    check_revision(&runtime, &input.revision)?;
-    let mut accounts = runtime.accounts.clone();
-    let account = accounts
-        .iter_mut()
-        .find(|account| account.username == input.username)
-        .ok_or_else(|| Error::bad("Account not found"))?;
-    account.role = input.role;
-    if let Some(password_hash) = password_hash {
-        account.password_hash = password_hash;
-        account.must_change_password = false;
-    }
-    if !accounts.iter().any(|account| account.role == Role::Admin) {
-        return Err(Error::conflict("At least one administrator must remain"));
-    }
-    let response = auth.write_accounts(&mut runtime, accounts)?;
-    runtime
-        .sessions
-        .retain(|_, session| session.username != input.username);
-    remove_bootstrap_file(
-        auth.path
-            .parent()
-            .ok_or_else(|| Error::bad("Missing account directory"))?,
-        &runtime.accounts,
-    )?;
-    Ok(Json(response))
+    auth.transaction(move |auth, runtime| {
+        require_admin(runtime, &headers)?;
+        check_revision(runtime, &input.revision)?;
+        let mut accounts = runtime.accounts.clone();
+        let account = accounts
+            .iter_mut()
+            .find(|account| account.username == input.username)
+            .ok_or_else(|| Error::bad("Account not found"))?;
+        account.role = input.role;
+        if let Some(password_hash) = password_hash {
+            account.password_hash = password_hash;
+            account.must_change_password = false;
+        }
+        if !accounts.iter().any(|account| account.role == Role::Admin) {
+            return Err(Error::conflict("At least one administrator must remain"));
+        }
+        let response = auth.write_accounts(runtime, accounts, Some(&input.username))?;
+        remove_bootstrap_file(
+            auth.path
+                .parent()
+                .ok_or_else(|| Error::bad("Missing account directory"))?,
+            &runtime.accounts,
+        )?;
+        Ok(Json(response))
+    })
+    .await
 }
 
 #[utoipa::path(post, path="/api/auth/accounts/delete", request_body=DeleteAccount, responses((status=200, body=AccountsDocument)))]
@@ -1126,32 +1264,30 @@ pub async fn delete_account(
     headers: HeaderMap,
     Json(input): Json<DeleteAccount>,
 ) -> Result<Json<AccountsDocument>> {
-    let mut runtime = auth.inner.lock().await;
-    auth.refresh(&mut runtime)?;
-    let current = require_admin(&mut runtime, &headers)?;
-    check_revision(&runtime, &input.revision)?;
-    if current.username == input.username {
-        return Err(Error::bad("You cannot delete your own account"));
-    }
-    let mut accounts = runtime.accounts.clone();
-    accounts.retain(|account| account.username != input.username);
-    if accounts.len() == runtime.accounts.len() {
-        return Err(Error::bad("Account not found"));
-    }
-    if !accounts.iter().any(|account| account.role == Role::Admin) {
-        return Err(Error::conflict("At least one administrator must remain"));
-    }
-    let response = auth.write_accounts(&mut runtime, accounts)?;
-    runtime
-        .sessions
-        .retain(|_, session| session.username != input.username);
-    remove_bootstrap_file(
-        auth.path
-            .parent()
-            .ok_or_else(|| Error::bad("Missing account directory"))?,
-        &runtime.accounts,
-    )?;
-    Ok(Json(response))
+    auth.transaction(move |auth, runtime| {
+        let current = require_admin(runtime, &headers)?;
+        check_revision(runtime, &input.revision)?;
+        if current.username == input.username {
+            return Err(Error::bad("You cannot delete your own account"));
+        }
+        let mut accounts = runtime.accounts.clone();
+        accounts.retain(|account| account.username != input.username);
+        if accounts.len() == runtime.accounts.len() {
+            return Err(Error::bad("Account not found"));
+        }
+        if !accounts.iter().any(|account| account.role == Role::Admin) {
+            return Err(Error::conflict("At least one administrator must remain"));
+        }
+        let response = auth.write_accounts(runtime, accounts, Some(&input.username))?;
+        remove_bootstrap_file(
+            auth.path
+                .parent()
+                .ok_or_else(|| Error::bad("Missing account directory"))?,
+            &runtime.accounts,
+        )?;
+        Ok(Json(response))
+    })
+    .await
 }
 
 #[utoipa::path(post, path="/api/auth/password", request_body=PasswordChange, responses((status=204)))]
@@ -1160,27 +1296,28 @@ pub async fn change_password(
     headers: HeaderMap,
     Json(input): Json<PasswordChange>,
 ) -> Result<Response> {
-    let (username, hash, revision) = {
-        let mut runtime = auth.inner.lock().await;
-        auth.refresh(&mut runtime)?;
-        let (account, _) = identify(&mut runtime, &headers).ok_or_else(unauthorized)?;
-        rate_limit(
-            &mut runtime,
-            &format!("password:{}", account.username),
-            5,
-            Duration::from_secs(900),
-        )?;
-        let stored = runtime
-            .accounts
-            .iter()
-            .find(|stored| stored.username == account.username)
-            .ok_or_else(unauthorized)?;
-        (
-            account.username,
-            stored.password_hash.clone(),
-            runtime.revision.clone(),
-        )
-    };
+    let checked_headers = headers.clone();
+    let (username, hash, revision) = auth
+        .transaction(move |_, runtime| {
+            let (account, _) = identify(runtime, &checked_headers).ok_or_else(unauthorized)?;
+            rate_limit(
+                runtime,
+                &format!("password:{}", account.username),
+                5,
+                Duration::from_secs(900),
+            )?;
+            let stored = runtime
+                .accounts
+                .iter()
+                .find(|stored| stored.username == account.username)
+                .ok_or_else(unauthorized)?;
+            Ok((
+                account.username,
+                stored.password_hash.clone(),
+                runtime.revision.clone(),
+            ))
+        })
+        .await?;
     if input.current_password.len() > 1024 {
         return Err(Error::bad("Current password is invalid"));
     }
@@ -1196,32 +1333,30 @@ pub async fn change_password(
         return Err(Error::bad("Current password is invalid"));
     }
     let password_hash = protected_hash(&auth, input.password).await?;
-    let mut runtime = auth.inner.lock().await;
-    auth.refresh(&mut runtime)?;
-    identify(&mut runtime, &headers).ok_or_else(unauthorized)?;
-    check_revision(&runtime, &revision)?;
-    let mut accounts = runtime.accounts.clone();
-    let account = accounts
-        .iter_mut()
-        .find(|account| account.username == username && account.password_hash == hash)
-        .ok_or_else(unauthorized)?;
-    account.password_hash = password_hash;
-    account.must_change_password = false;
-    auth.write_accounts(&mut runtime, accounts)?;
-    runtime
-        .sessions
-        .retain(|_, session| session.username != username);
-    remove_bootstrap_file(
-        auth.path
-            .parent()
-            .ok_or_else(|| Error::bad("Missing account directory"))?,
-        &runtime.accounts,
-    )?;
-    let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, auth.cookie("", 0)?);
-    Ok(response)
+    auth.transaction(move |auth, runtime| {
+        identify(runtime, &headers).ok_or_else(unauthorized)?;
+        check_revision(runtime, &revision)?;
+        let mut accounts = runtime.accounts.clone();
+        let account = accounts
+            .iter_mut()
+            .find(|account| account.username == username && account.password_hash == hash)
+            .ok_or_else(unauthorized)?;
+        account.password_hash = password_hash;
+        account.must_change_password = false;
+        auth.write_accounts(runtime, accounts, Some(&username))?;
+        remove_bootstrap_file(
+            auth.path
+                .parent()
+                .ok_or_else(|| Error::bad("Missing account directory"))?,
+            &runtime.accounts,
+        )?;
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, auth.cookie("", 0)?);
+        Ok(response)
+    })
+    .await
 }
 
 pub fn bootstrap_admin(directory: &Path, username: &str, password: &str) -> Result<()> {
@@ -1452,6 +1587,100 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn cancelled_auth_work_retains_gate_and_publishes_durable_state()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let auth = Auth::load(directory.path(), None).map_err(|error| error.message)?;
+        let worker_auth = auth.clone();
+        let (started, wait_started) = tokio::sync::oneshot::channel();
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let worker = tokio::spawn(async move {
+            worker_auth
+                .transaction(move |auth, runtime| {
+                    let _ = started.send(());
+                    wait_release
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| Error::bad("Fixture barrier failed"))?;
+                    let account = runtime
+                        .accounts
+                        .first()
+                        .ok_or_else(|| Error::bad("Missing fixture account"))?;
+                    runtime.sessions.insert(
+                        token_key(&"a".repeat(64)),
+                        Session {
+                            account_id: account.account_id.clone(),
+                            username: account.username.clone(),
+                            expires_at: crate::now() + 300,
+                        },
+                    );
+                    write_sessions(&auth.sessions_path, &runtime.revision, &runtime.sessions)
+                })
+                .await
+        });
+        wait_started.await?;
+        worker.abort();
+        assert!(worker.await.is_err());
+        assert!(auth.operation.try_lock().is_err());
+        assert!(auth.inner.try_lock().is_ok());
+        let reader_auth = auth.clone();
+        let reader = tokio::spawn(async move {
+            reader_auth
+                .transaction(|_, runtime| Ok(runtime.sessions.len()))
+                .await
+        });
+        release.send(())?;
+        assert_eq!(reader.await?.map_err(|error| error.message)?, 1);
+        let restarted = Auth::load(directory.path(), None).map_err(|error| error.message)?;
+        assert_eq!(restarted.inner.lock().await.sessions.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interrupted_account_write_cannot_resurrect_revoked_sessions()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let auth = Auth::load(directory.path(), None).map_err(|error| error.message)?;
+        auth.transaction(|auth, runtime| {
+            let account = runtime
+                .accounts
+                .first()
+                .ok_or_else(|| Error::bad("Missing fixture account"))?;
+            runtime.sessions.insert(
+                token_key(&"b".repeat(64)),
+                Session {
+                    account_id: account.account_id.clone(),
+                    username: account.username.clone(),
+                    expires_at: crate::now() + 300,
+                },
+            );
+            write_sessions(&auth.sessions_path, &runtime.revision, &runtime.sessions)
+        })
+        .await
+        .map_err(|error| error.message)?;
+        let result = auth
+            .transaction(|auth, runtime| {
+                let mut accounts = runtime.accounts.clone();
+                let account = accounts
+                    .first_mut()
+                    .ok_or_else(|| Error::bad("Missing fixture account"))?;
+                let username = account.username.clone();
+                account.must_change_password = false;
+                std::fs::rename(&auth.path, auth.path.with_extension("fixture"))?;
+                std::fs::create_dir(&auth.path)?;
+                auth.write_accounts(runtime, accounts, Some(&username))
+            })
+            .await;
+        assert!(result.is_err());
+        let path = directory.path().join("panel-accounts.json");
+        std::fs::remove_dir(&path)?;
+        std::fs::rename(path.with_extension("fixture"), &path)?;
+        drop(auth);
+        let restarted = Auth::load(directory.path(), None).map_err(|error| error.message)?;
+        assert!(restarted.inner.lock().await.sessions.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn expired_sessions_are_removed_before_authorization() {
         let token = "a".repeat(64);
@@ -1467,6 +1696,7 @@ mod tests {
             sessions: HashMap::from([(
                 token_key(&token),
                 Session {
+                    account_id: "a".repeat(64),
                     username: "owner".into(),
                     expires_at: crate::now().saturating_sub(1),
                 },
