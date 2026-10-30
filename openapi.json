@@ -972,6 +972,39 @@
         }
       }
     },
+    "/api/mods/updates": {
+      "get": {
+        "tags": [
+          "crate::mods"
+        ],
+        "operationId": "get_all_updates",
+        "parameters": [
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModUpdateCheck"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/mods/upload": {
       "post": {
         "tags": [
@@ -1249,6 +1282,14 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           }
         ],
@@ -2926,6 +2967,50 @@
           }
         },
         "additionalProperties": false
+      },
+      "ModUpdateCheck": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "summary",
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "ready"
+                ]
+              },
+              "summary": {
+                "$ref": "#/components/schemas/ModUpdates"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "message",
+              "status"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "failed"
+                ]
+              }
+            }
+          }
+        ]
       },
       "ModUpdateRequest": {
         "type": "object",

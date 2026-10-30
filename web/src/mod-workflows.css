@@ -71,3 +71,14 @@
     padding: 12px;
   }
 }
+
+.portal-install-action {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 22rem;
+}
+.portal-install-reason {
+  margin: 0;
+  color: var(--text-warm, #ffdaa3);
+  font-size: 1rem;
+}

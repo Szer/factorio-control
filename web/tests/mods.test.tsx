@@ -77,11 +77,12 @@ function mount(active = true) {
     settings: [],
     available: false,
   });
-  const checks = vi.spyOn(api, "modUpdates").mockImplementation((name) => {
-    const result = summaries[name];
-    if (!result) throw new Error("Unknown fixture");
-    return Promise.resolve(result);
-  });
+  const checks = vi.spyOn(api, "allModUpdates").mockResolvedValue(
+    Object.values(summaries).map((summary) => ({
+      status: "ready" as const,
+      summary,
+    })),
+  );
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -144,7 +145,8 @@ it("updates the selected version with the current document revision and checks a
   await user.click(
     await screen.findByRole("button", { name: "Check all updates" }),
   );
-  expect(checks.mock.calls.length).toBeGreaterThanOrEqual(6);
+  expect(checks.mock.calls.length).toBeGreaterThanOrEqual(2);
+  expect(checks).toHaveBeenLastCalledWith(true);
 });
 
 it("does not query release metadata while the Mods page is hidden", async () => {
@@ -152,4 +154,99 @@ it("does not query release metadata while the Mods page is hidden", async () => 
   await screen.findByRole("button", { name: "Installed mods" });
   expect(api.mods).not.toHaveBeenCalled();
   expect(checks).not.toHaveBeenCalled();
+});
+
+it("uses one batch request for the entire table", async () => {
+  const checks = mount();
+  await screen.findByRole("button", { name: "Update old mod to 1.2.0" });
+  expect(checks).toHaveBeenCalledTimes(1);
+});
+
+it("reuses cached summaries when navigating away and back", async () => {
+  vi.spyOn(api, "mods").mockResolvedValue(document);
+  const checks = vi.spyOn(api, "allModUpdates").mockResolvedValue(
+    Object.values(summaries).map((summary) => ({
+      status: "ready" as const,
+      summary,
+    })),
+  );
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const page = (active: boolean) => (
+    <QueryClientProvider client={client}>
+      <TestAccess>
+        <Mods status={status} active={active} />
+      </TestAccess>
+    </QueryClientProvider>
+  );
+  const view = render(page(true));
+  await screen.findByRole("button", { name: "Update old mod to 1.2.0" });
+  view.rerender(page(false));
+  view.rerender(page(true));
+  await screen.findByRole("button", { name: "Update old mod to 1.2.0" });
+  expect(checks).toHaveBeenCalledTimes(1);
+  client.clear();
+});
+
+it("keeps successful rows when one portal check fails", async () => {
+  vi.spyOn(api, "mods").mockResolvedValue(document);
+  const current = summaries.current;
+  if (!current) throw new Error("Missing fixture");
+  vi.spyOn(api, "allModUpdates").mockResolvedValue([
+    { status: "ready", summary: current },
+    { status: "failed", name: "old", message: "Portal unavailable" },
+    { status: "failed", name: "unsupported", message: "Portal unavailable" },
+  ]);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <TestAccess>
+        <Mods status={status} />
+      </TestAccess>
+    </QueryClientProvider>,
+  );
+  expect(
+    await screen.findAllByRole("button", { name: "Retry check" }),
+  ).toHaveLength(2);
+  expect(screen.getByText("current mod").closest("tr")?.textContent).toContain(
+    "1.0.0",
+  );
+  client.clear();
+});
+
+it("retries one failed row without rechecking the whole portal catalog", async () => {
+  vi.spyOn(api, "mods").mockResolvedValue(document);
+  const summary = summaries.old;
+  if (!summary) throw new Error("Missing fixture");
+  const batch = vi.spyOn(api, "allModUpdates").mockResolvedValue(
+    Object.values(summaries).map((item) =>
+      item.name === "old"
+        ? {
+            status: "failed" as const,
+            name: "old",
+            message: "Portal unavailable",
+          }
+        : { status: "ready" as const, summary: item },
+    ),
+  );
+  const single = vi.spyOn(api, "modUpdates").mockResolvedValue(summary);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <TestAccess>
+        <Mods status={status} />
+      </TestAccess>
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Retry check" }));
+  await screen.findByRole("button", { name: "Update old mod to 1.2.0" });
+  expect(single).toHaveBeenCalledWith("old", true);
+  expect(batch).toHaveBeenCalledTimes(1);
+  client.clear();
 });

@@ -420,6 +420,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/mods/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_all_updates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/mods/upload": {
         parameters: {
             query?: never;
@@ -975,6 +991,16 @@ export interface components {
                 [key: string]: components["schemas"]["ModSettingChange"];
             };
             revision: string;
+        };
+        ModUpdateCheck: {
+            /** @enum {string} */
+            status: "ready";
+            summary: components["schemas"]["ModUpdates"];
+        } | {
+            message: string;
+            name: string;
+            /** @enum {string} */
+            status: "failed";
         };
         ModUpdateRequest: {
             revision: string;
@@ -2018,6 +2044,27 @@ export interface operations {
             };
         };
     };
+    get_all_updates: {
+        parameters: {
+            query?: {
+                refresh?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModUpdateCheck"][];
+                };
+            };
+        };
+    };
     upload_mod: {
         parameters: {
             query?: never;
@@ -2203,7 +2250,9 @@ export interface operations {
     };
     get_updates: {
         parameters: {
-            query?: never;
+            query?: {
+                refresh?: boolean;
+            };
             header?: never;
             path: {
                 name: string;
