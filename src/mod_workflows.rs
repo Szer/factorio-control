@@ -15,7 +15,7 @@ pub struct ModOperationProgress {
     pub total: usize,
     pub current: Option<String>,
 }
-struct ProgressGuard {
+pub(super) struct ProgressGuard {
     directory: PathBuf,
 }
 impl ProgressGuard {
@@ -38,7 +38,12 @@ impl ProgressGuard {
         ));
         Ok(guard)
     }
-    fn update(&self, stage: &str, completed: usize, current: Option<&str>) -> Result<()> {
+    pub(super) fn update(
+        &self,
+        stage: &str,
+        completed: usize,
+        current: Option<&str>,
+    ) -> Result<()> {
         let mut progress = PROGRESS
             .lock()
             .map_err(|_| Error::bad("Mod progress is unavailable"))?;
@@ -48,6 +53,17 @@ impl ProgressGuard {
             value.stage = stage.into();
             value.completed = completed;
             value.current = current.map(str::to_owned);
+        }
+        Ok(())
+    }
+    fn total(&self, total: usize) -> Result<()> {
+        let mut progress = PROGRESS
+            .lock()
+            .map_err(|_| Error::bad("Mod progress is unavailable"))?;
+        if let Some((directory, value)) = progress.as_mut()
+            && *directory == self.directory
+        {
+            value.total = total;
         }
         Ok(())
     }
@@ -556,24 +572,45 @@ pub(super) async fn download_response(
     .await
 }
 
+#[cfg(test)]
 fn commit_staged(
     app: &App,
     revision: &str,
     staged: &[(ModInfo, PathBuf)],
     engine: &str,
 ) -> Result<ModsDocument> {
+    commit_plan(app, revision, staged, engine, None)
+}
+fn commit_plan(
+    app: &App,
+    revision: &str,
+    staged: &[(ModInfo, PathBuf)],
+    engine: &str,
+    activation: Option<ModList>,
+) -> Result<ModsDocument> {
     let document = current(app, revision)?;
     let path = directory(app)?;
-    let (mut mod_list, _) = read_list(&path)?;
+    let mut mod_list = match activation {
+        Some(list) => list,
+        None => read_list(&path)?.0,
+    };
     let mut candidates = document.mods.clone();
     for (info, file) in staged {
-        let enabled = candidates
+        let enabled = mod_list
+            .mods
             .iter()
-            .find(|item| item.name == info.name)
-            .is_none_or(|item| item.enabled);
+            .find(|entry| entry.name == info.name)
+            .is_none_or(|entry| entry.enabled);
         candidates.retain(|item| item.name != info.name);
         candidates.push(installed(info.clone(), enabled, fs::metadata(file)?.len()));
         set_entry(&mut mod_list, &info.name, enabled, &info.version);
+    }
+    for candidate in &mut candidates {
+        candidate.enabled = mod_list
+            .mods
+            .iter()
+            .find(|entry| entry.name == candidate.name)
+            .is_none_or(|entry| entry.enabled);
     }
     validate_selection(app, &mod_list, &candidates, engine)?;
     let added: Vec<_> = staged
@@ -692,10 +729,6 @@ pub async fn portal_versions(
         let inner = app.inner.lock().await;
         known_engine(&inner)?.to_owned()
     };
-    let _permit = UPDATE_CHECKS
-        .acquire()
-        .await
-        .map_err(|_| Error::bad("Portal unavailable"))?;
     let mut releases: Vec<_> = full_releases(&client()?, &name)
         .await?
         .into_iter()
@@ -733,46 +766,38 @@ pub(super) async fn apply_changes(
     };
     let snapshot = app.clone();
     let expected = revision.to_owned();
-    let (credentials, storage_guard) = blocking(move || {
+    let (credentials, document, activation, bundled, storage_guard) = blocking(move || {
         let guard = storage_guard;
         ensure_consistent(&snapshot)?;
-        current(&snapshot, &expected)?;
+        let document = current(&snapshot, &expected)?;
+        let activation = read_list(&directory(&snapshot)?)?.0;
+        let bundled = bundled_inventory(&snapshot)?;
         let credentials = credentials(&snapshot)?
             .ok_or_else(|| Error::bad("Mod downloads require a Factorio username and token"))?;
-        Ok((credentials, guard))
+        Ok((credentials, document, activation, bundled, guard))
     })
     .await?;
     let progress = ProgressGuard::new(app, changes.len())?;
-    let mut seen = HashSet::new();
+    progress.update("Resolving dependencies", 0, None)?;
     let client = client()?;
+    let plan = resolver::resolve(
+        &client, &document, activation, changes, &bundled, &engine, &progress,
+    )
+    .await?;
+    progress.total(plan.downloads.len())?;
     let staging = tempfile::tempdir_in(&app.directory)?;
     let mut staged = Vec::new();
     let mut total = 0_u64;
-    for (index, (name, target)) in changes.iter().enumerate() {
-        progress.update("Checking release", index, Some(name))?;
-        if !valid_name(name) || protected(name) || !seen.insert(name) {
-            return Err(Error::bad("Invalid or duplicate mod selection"));
-        }
-        version(target)?;
-        let releases = full_releases(&client, name).await?;
-        let release = releases
-            .iter()
-            .find(|release| {
-                release.version == *target
-                    && engine_compatible(
-                        &release.info_json.factorio_version,
-                        &release.info_json.dependencies,
-                        &engine,
-                    )
-            })
-            .ok_or_else(|| Error::bad("Selected mod release is unavailable or incompatible"))?;
+    for (index, (name, release)) in plan.downloads.iter().enumerate() {
         progress.update("Downloading", index, Some(name))?;
         let file = download(&client, name, release, &credentials, &app.directory).await?;
         total = total.saturating_add(file.as_file().metadata()?.len());
         if total > MAX_BATCH_BYTES {
             return Err(Error::bad("Mod batch exceeds 1 GiB"));
         }
-        let destination = staging.path().join(format!("{name}_{target}.zip"));
+        let destination = staging
+            .path()
+            .join(format!("{name}_{}.zip", release.version));
         let (info, path) = blocking(move || {
             let (info, _) = archive_info(file.path())?;
             copy_archive(file.path(), &destination)?;
@@ -790,13 +815,19 @@ pub(super) async fn apply_changes(
             ));
         }
     }
-    progress.update("Validating and activating", changes.len(), None)?;
+    progress.update("Validating and activating", plan.downloads.len(), None)?;
     let snapshot = app.clone();
     let expected = revision.to_owned();
     let result = blocking(move || {
         let _guard = storage_guard;
         let _staging = staging;
-        commit_staged(&snapshot, &expected, &staged, &engine)
+        commit_plan(
+            &snapshot,
+            &expected,
+            &staged,
+            &engine,
+            Some(plan.activation),
+        )
     })
     .await?;
     progress.complete()?;
@@ -826,24 +857,31 @@ pub async fn bulk_preview(
         ))
     })
     .await?;
-    let _permit = UPDATE_CHECKS
-        .acquire()
-        .await
-        .map_err(|_| Error::bad("Portal unavailable"))?;
     let client = client()?;
-    let mut changes = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
     for item in document.mods {
-        let releases = full_releases(&client, &item.name).await?;
-        if let Some(latest) = newest(&releases, &engine)
-            && version(&latest.version)? > version(&item.version)?
-        {
-            changes.push(BulkChange {
-                name: item.name,
-                current_version: item.version,
-                version: latest.version.clone(),
-            });
+        let client = client.clone();
+        let engine = engine.clone();
+        tasks.spawn(async move {
+            let releases = full_releases(&client, &item.name).await?;
+            Ok::<_, Error>(
+                newest(&releases, &engine)
+                    .filter(|latest| version(&latest.version).ok() > version(&item.version).ok())
+                    .map(|latest| BulkChange {
+                        name: item.name,
+                        current_version: item.version,
+                        version: latest.version.clone(),
+                    }),
+            )
+        });
+    }
+    let mut changes = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        if let Some(change) = result.map_err(|_| Error::bad("Update preview interrupted"))?? {
+            changes.push(change);
         }
     }
+    changes.sort_by(|a, b| a.name.cmp(&b.name));
     let revision = input.revision.clone();
     mutation(&app, move |app, _engine| {
         current(&app, &revision)?;
@@ -1416,6 +1454,37 @@ mod tests {
             Some(StatusCode::CONFLICT)
         );
         assert!(!journal_path(&app).exists());
+        Ok(())
+    }
+    #[test]
+    fn resolved_activation_enables_local_dependency_and_commits_new_mod_together() -> Result<()> {
+        let (_directory, app) = app()?;
+        put(&app, "library", "1.0.0", &["base"])?;
+        let path = directory(&app)?;
+        let mut activation = read_list(&path)?.0;
+        set_entry(&mut activation, "library", false, "1.0.0");
+        storage::atomic_write(
+            &path.join("mod-list.json"),
+            &serde_json::to_vec(&activation)?,
+            true,
+        )?;
+        let revision = list(&app)?.revision;
+        let bytes = fixture("feature", "1.0.0", &["library >= 1.0"])?;
+        let staged = app.directory.join("feature-staging.zip");
+        storage::atomic_write(&staged, &bytes, false)?;
+        let info = validate_archive(&bytes)?;
+        set_entry(&mut activation, "library", true, "1.0.0");
+        set_entry(&mut activation, "feature", true, "1.0.0");
+        let result = commit_plan(
+            &app,
+            &revision,
+            &[(info, staged)],
+            "2.1.24",
+            Some(activation),
+        )?;
+        assert_eq!(result.mods.len(), 2);
+        assert!(result.mods.iter().all(|item| item.enabled));
+        assert!(list(&app)?.mods.iter().any(|item| item.name == "feature"));
         Ok(())
     }
     #[test]

@@ -72,18 +72,23 @@ beforeEach(() => {
     available: false,
     settings: [],
   });
-  vi.spyOn(api, "modUpdates").mockResolvedValue({
-    name: "fixture",
-    installed_version: "2.0.0",
-    latest_version: "2.0.0",
-    latest_released_at: null,
-    factorio_min_version: "2.1.0",
-    compatible: true,
-    update_available: false,
-    authenticated: true,
-    factorio_version: "2.1.23",
-    message: null,
-  });
+  vi.spyOn(api, "allModUpdates").mockResolvedValue([
+    {
+      status: "ready",
+      summary: {
+        name: "fixture",
+        installed_version: "2.0.0",
+        latest_version: "2.0.0",
+        latest_released_at: null,
+        factorio_min_version: "2.1.0",
+        compatible: true,
+        update_available: false,
+        authenticated: true,
+        factorio_version: "2.1.23",
+        message: null,
+      },
+    },
+  ]);
 });
 afterEach(() => {
   cleanup();
@@ -240,4 +245,53 @@ it("reloads a conflicted mod revision without silently retrying the mutation", a
       "fixture-pack",
     );
   });
+});
+
+it("explains the running server lock next to the disabled Install button", async () => {
+  vi.spyOn(modWorkflowApi, "releases").mockResolvedValue({
+    name: "fixture",
+    releases: [
+      { version: "3.0.0", factorio_version: "2.1", released_at: null },
+    ],
+  });
+  const install = vi.spyOn(modWorkflowApi, "install");
+  mount({ ...status, state: "running" });
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Manage mods" }));
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Installed mod versions" }),
+    "fixture",
+  );
+  const button = await screen.findByRole("button", { name: "Install version" });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  expect(button.getAttribute("aria-describedby")).toBe("portal-install-reason");
+  const reason = screen.getByText(
+    "Server is running. Stop it in Overview to install mods.",
+  );
+  expect(reason.closest(".portal-install-action")?.contains(button)).toBe(true);
+  expect(install).not.toHaveBeenCalled();
+});
+
+it("explains an already installed version without blaming the stopped server", async () => {
+  vi.spyOn(modWorkflowApi, "releases").mockResolvedValue({
+    name: "fixture",
+    releases: [
+      { version: "2.0.0", factorio_version: "2.1", released_at: null },
+    ],
+  });
+  mount();
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Manage mods" }));
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Installed mod versions" }),
+    "fixture",
+  );
+  expect(
+    await screen.findByText("This version is already installed."),
+  ).toBeTruthy();
+  expect(
+    screen
+      .getByRole("button", { name: "Install version" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
 });

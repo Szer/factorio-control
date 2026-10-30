@@ -1,4 +1,10 @@
 use crate::hex;
+#[path = "mod_dependency.rs"]
+mod dependency;
+#[path = "release_cache.rs"]
+mod release_cache;
+#[path = "mod_resolver.rs"]
+mod resolver;
 #[path = "save_sync.rs"]
 pub mod save_sync;
 #[path = "mod_workflows.rs"]
@@ -309,6 +315,17 @@ pub fn directory(app: &App) -> Result<PathBuf> {
     Ok(path)
 }
 fn bundled_mods(app: &App) -> Result<BTreeMap<String, String>> {
+    Ok(bundled_inventory(app)?
+        .into_iter()
+        .map(|(name, item)| (name, item.version))
+        .collect())
+}
+#[derive(Clone)]
+struct BundledMod {
+    version: String,
+    dependencies: Vec<String>,
+}
+fn bundled_inventory(app: &App) -> Result<BTreeMap<String, BundledMod>> {
     let mut bundled = BTreeMap::new();
     let Some(binary) = app.binary.as_ref() else {
         return Ok(bundled);
@@ -334,6 +351,8 @@ fn bundled_mods(app: &App) -> Result<BTreeMap<String, String>> {
     struct Builtin {
         name: String,
         version: Option<String>,
+        #[serde(default)]
+        dependencies: Vec<String>,
     }
     for entry in fs::read_dir(data)? {
         let entry = entry?;
@@ -355,7 +374,13 @@ fn bundled_mods(app: &App) -> Result<BTreeMap<String, String>> {
             .version
             .ok_or_else(|| Error::bad("Bundled mod is missing its version"))?;
         version(&value)?;
-        bundled.insert(info.name, value);
+        bundled.insert(
+            info.name,
+            BundledMod {
+                version: value,
+                dependencies: info.dependencies,
+            },
+        );
     }
     Ok(bundled)
 }
@@ -645,62 +670,17 @@ fn check_dependencies(
     for item in mods.iter().filter(|item| item.enabled) {
         edges.entry(&item.name).or_default();
         for dependency in &item.dependencies {
-            let mut text = dependency.trim();
-            let optional = text.starts_with(['?', '+']) || text.starts_with("(?)");
-            let incompatible = text.starts_with('!');
-            let unordered = text.starts_with('~');
-            if let Some(rest) = text.strip_prefix("(?)") {
-                text = rest.trim();
-            } else if text.starts_with(['?', '!', '~', '+']) {
-                text = text
-                    .get(1..)
-                    .ok_or_else(|| Error::bad("Invalid mod dependency"))?
-                    .trim();
-            }
-            let (name, comparison) = match text.find(['<', '>', '=']) {
-                Some(index) => (
-                    text.get(..index)
-                        .ok_or_else(|| Error::bad("Invalid mod dependency"))?
-                        .trim(),
-                    text.get(index..)
-                        .ok_or_else(|| Error::bad("Invalid mod dependency"))?
-                        .trim(),
+            let parsed = dependency::Dependency::parse(dependency).map_err(|error| Error {
+                status: error.status,
+                message: format!(
+                    "{} declares unsupported dependency {dependency:?}: {}",
+                    item.name, error.message
                 ),
-                None => (text, ""),
-            };
-            // Dependency references may name legacy mods containing spaces or Unicode.
-            if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
-                return Err(Error::bad(&format!(
-                    "{} declares unsupported dependency {dependency:?}",
-                    item.name
-                )));
-            }
-            let constraint = if comparison.is_empty() {
-                None
-            } else {
-                let operator_len = if comparison.starts_with("<=") || comparison.starts_with(">=") {
-                    2
-                } else {
-                    1
-                };
-                let operator = comparison
-                    .get(..operator_len)
-                    .ok_or_else(|| Error::bad("Invalid dependency comparison"))?;
-                let required = comparison
-                    .get(operator_len..)
-                    .ok_or_else(|| Error::bad("Invalid dependency version"))?
-                    .trim();
-                Some((
-                    operator,
-                    dependency_version(required).map_err(|error| Error {
-                        status: error.status,
-                        message: format!(
-                            "{} dependency {dependency:?}: {}",
-                            item.name, error.message
-                        ),
-                    })?,
-                ))
-            };
+            })?;
+            let name = parsed.name;
+            let optional = parsed.kind == dependency::Kind::Optional;
+            let incompatible = parsed.kind == dependency::Kind::Incompatible;
+            let unordered = parsed.kind == dependency::Kind::Unordered;
             let installed = mods
                 .iter()
                 .find(|candidate| candidate.name == name && candidate.enabled);
@@ -734,22 +714,14 @@ fn check_dependencies(
             if !unordered && let Some(installed) = installed {
                 edges.entry(&item.name).or_default().insert(&installed.name);
             }
-            if let Some((operator, required)) = constraint {
+            if let Some(constraint) = parsed.constraint {
                 let Some(actual) = installed
                     .map(|candidate| candidate.version.as_str())
                     .or(builtin_version)
                 else {
                     continue;
                 };
-                let actual = version(actual)?;
-                let satisfied = match operator {
-                    "=" => actual == required,
-                    ">=" => actual >= required,
-                    ">" => actual > required,
-                    "<=" => actual <= required,
-                    "<" => actual < required,
-                    _ => return Err(Error::bad("Unsupported mod dependency comparison")),
-                };
+                let satisfied = constraint.matches(actual);
                 if !satisfied {
                     return Err(Error::bad(&format!(
                         "{} has an unsatisfied version requirement for {name}",
@@ -920,6 +892,7 @@ pub fn routes() -> Router<App> {
             get(save_sync::progress).post(save_sync::apply),
         )
         .route("/mods", get(get_mods))
+        .route("/mods/updates", get(get_all_updates))
         .route(
             "/mods/upload",
             post(upload_mod)
@@ -1155,25 +1128,33 @@ struct PortalMod {
     releases: Vec<Release>,
 }
 fn client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(90))
-        .connect_timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            let url = attempt.url();
-            if attempt.previous().len() < 4
-                && url.scheme() == "https"
-                && url
-                    .host_str()
-                    .is_some_and(|host| host == "factorio.com" || host.ends_with(".factorio.com"))
-                && url.port().is_none_or(|port| port == 443)
-            {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
-        .build()
-        .map_err(|_| Error::bad("Could not initialize mod portal connection"))
+    static CLIENT: std::sync::OnceLock<std::result::Result<reqwest::Client, &'static str>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(90))
+                .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    let url = attempt.url();
+                    if attempt.previous().len() < 4
+                        && url.scheme() == "https"
+                        && url.host_str().is_some_and(|host| {
+                            host == "factorio.com" || host.ends_with(".factorio.com")
+                        })
+                        && url.port().is_none_or(|port| port == 443)
+                    {
+                        attempt.follow()
+                    } else {
+                        attempt.stop()
+                    }
+                }))
+                .build()
+                .map_err(|_| "Could not initialize mod portal connection")
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|message| Error::bad(message))
 }
 async fn response_bytes(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     if !response.status().is_success() {
@@ -1204,25 +1185,7 @@ async fn full_releases(client: &reqwest::Client, name: &str) -> Result<Vec<Relea
     portal_releases(client, name, true).await
 }
 async fn portal_releases(client: &reqwest::Client, name: &str, full: bool) -> Result<Vec<Release>> {
-    if !valid_name(name) {
-        return Err(Error::bad("Invalid mod name"));
-    }
-    let suffix = if full { "/full" } else { "" };
-    let response = client
-        .get(format!("https://mods.factorio.com/api/mods/{name}{suffix}"))
-        .send()
-        .await
-        .map_err(|_| Error {
-            status: StatusCode::BAD_GATEWAY,
-            message: "Could not reach the Factorio mod portal".into(),
-        })?;
-    let document: PortalMod =
-        serde_json::from_slice(&response_bytes(response, 4 * 1024 * 1024).await?)
-            .map_err(|_| Error::bad("Invalid mod portal response"))?;
-    if document.name != name || document.releases.len() > 10_000 {
-        return Err(Error::bad("Unexpected mod portal response"));
-    }
-    Ok(document.releases)
+    release_cache::get(client, name, full, false).await
 }
 fn base_constraints(dependencies: &[String]) -> Result<Vec<(&str, [u32; 3])>> {
     let mut constraints = Vec::new();
@@ -1348,10 +1311,70 @@ fn update_summary(
         },
     })
 }
-#[utoipa::path(get, path="/api/mods/{name}/updates", params(("name"=String, Path)), responses((status=200, body=ModUpdates), (status=400, body=ApiError), (status=409, body=ApiError), (status=502, body=ApiError)))]
+#[derive(Clone, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ModUpdateCheck {
+    Ready { summary: ModUpdates },
+    Failed { name: String, message: String },
+}
+#[derive(Default, Deserialize)]
+pub struct UpdatesQuery {
+    #[serde(default)]
+    pub refresh: bool,
+}
+#[utoipa::path(get, path="/api/mods/updates", params(("refresh"=Option<bool>, Query)), responses((status=200, body=Vec<ModUpdateCheck>)))]
+pub async fn get_all_updates(
+    State(app): State<App>,
+    axum::extract::Query(query): axum::extract::Query<UpdatesQuery>,
+) -> Result<Json<Vec<ModUpdateCheck>>> {
+    let engine = known_engine(&*app.inner.lock().await)?.to_owned();
+    let document = app.mod_storage(|app| list(&app)).await?;
+    let client = client()?;
+    let mut tasks = tokio::task::JoinSet::new();
+    for installed in document.mods {
+        let client = client.clone();
+        let engine = engine.clone();
+        tasks.spawn(async move {
+            let result = async {
+                let releases =
+                    release_cache::get(&client, &installed.name, true, query.refresh).await?;
+                update_summary(
+                    &installed,
+                    &releases,
+                    &engine,
+                    document.portal_authenticated,
+                )
+            }
+            .await;
+            match result {
+                Ok(summary) => ModUpdateCheck::Ready { summary },
+                Err(error) => ModUpdateCheck::Failed {
+                    name: installed.name,
+                    message: error.message,
+                },
+            }
+        });
+    }
+    let mut results = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        results.push(result.map_err(|_| Error::bad("Mod update check interrupted"))?);
+    }
+    results.sort_by(|a, b| {
+        fn name(check: &ModUpdateCheck) -> &str {
+            match check {
+                ModUpdateCheck::Ready { summary } => &summary.name,
+                ModUpdateCheck::Failed { name, .. } => name,
+            }
+        }
+        name(a).cmp(name(b))
+    });
+    Ok(Json(results))
+}
+#[utoipa::path(get, path="/api/mods/{name}/updates", params(("name"=String, Path), ("refresh"=Option<bool>,Query)), responses((status=200, body=ModUpdates), (status=400, body=ApiError), (status=409, body=ApiError), (status=502, body=ApiError)))]
 pub async fn get_updates(
     State(app): State<App>,
     Path(name): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<UpdatesQuery>,
 ) -> Result<Json<ModUpdates>> {
     let engine = known_engine(&*app.inner.lock().await)?.to_owned();
     let lookup = name.clone();
@@ -1366,11 +1389,7 @@ pub async fn get_updates(
             Ok((installed, document.portal_authenticated))
         })
         .await?;
-    let _permit = UPDATE_CHECKS
-        .acquire()
-        .await
-        .map_err(|_| Error::bad("Mod update checks are unavailable"))?;
-    let releases = full_releases(&client()?, &name).await?;
+    let releases = release_cache::get(&client()?, &name, true, query.refresh).await?;
     Ok(Json(update_summary(
         &installed,
         &releases,
@@ -1551,5 +1570,68 @@ mod release_summary_tests {
             &["some-unrelated-mod >= 999.0.0".into()],
             "2.1.23"
         ));
+    }
+    #[tokio::test]
+    async fn batch_http_summaries_use_current_inventory_engine_and_credentials()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use tower::ServiceExt;
+        let temporary = tempfile::tempdir()?;
+        let app = App::new(temporary.path().join("data"), None).map_err(|e| e.message)?;
+        app.inner.lock().await.status.version = Some("2.1.24".into());
+        for name in ["batch-summary-one", "batch-summary-two"] {
+            let file = fs::File::create(
+                directory(&app)
+                    .map_err(|e| e.message)?
+                    .join(format!("{name}_1.0.0.zip")),
+            )?;
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                format!("{name}_1.0.0/info.json"),
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            zip.write_all(&serde_json::to_vec(&serde_json::json!({"name":name,"version":"1.0.0","title":name,"author":"Synthetic fixture","factorio_version":"2.1","dependencies":["base"]}))?)?;
+            zip.finish()?;
+            release_cache::prime(name, vec![release("2.0.0", "2.1", &["base"])]).await;
+        }
+        let router = crate::test_support::authenticated(
+            crate::api::router(app.clone(), temporary.path()),
+            &app.directory,
+        )
+        .await?;
+        let request = || {
+            Request::builder()
+                .uri("/api/mods/updates")
+                .header("Host", "localhost:9400")
+                .body(Body::empty())
+        };
+        let response = router.clone().oneshot(request()?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await?;
+        let checks: Vec<ModUpdateCheck> = serde_json::from_slice(&bytes)?;
+        assert_eq!(checks.len(), 2);
+        for check in checks {
+            let ModUpdateCheck::Ready { summary } = check else {
+                return Err("Unexpected failed cached check".into());
+            };
+            assert_eq!(summary.installed_version, "1.0.0");
+            assert!(summary.update_available);
+            assert_eq!(summary.latest_version.as_deref(), Some("2.0.0"));
+        }
+        app.inner.lock().await.status.version = Some("2.0.99".into());
+        let response = router.clone().oneshot(request()?).await?;
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await?;
+        let checks: Vec<ModUpdateCheck> = serde_json::from_slice(&bytes)?;
+        assert!(checks.iter().all(|check| matches!(check,ModUpdateCheck::Ready {summary} if !summary.compatible && summary.factorio_version=="2.0.99")));
+        let malformed = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/mods/updates?refresh=invalid")
+                    .header("Host", "localhost:9400")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        Ok(())
     }
 }

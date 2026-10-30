@@ -4,7 +4,6 @@ import { Fragment, useRef, useState } from "react";
 import {
   useIsFetching,
   useIsMutating,
-  useQueries,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -41,7 +40,9 @@ function ModRow({
   mod: ModsDocument["mods"][number];
   document: ModsDocument;
   stopped: boolean;
-  updates: UseQueryResult<ModUpdates>;
+  updates: Pick<UseQueryResult<ModUpdates>, "data" | "isError" | "error"> & {
+    refetch: () => Promise<unknown>;
+  };
 }) {
   const client = useQueryClient();
   const busy = useIsMutating({ mutationKey: ["mod-change"] }) > 0;
@@ -121,7 +122,7 @@ function ModRow({
                 }
                 aria-label={`Update ${mod.title || mod.name} to ${updates.data.latest_version}`}
                 onClick={() => {
-                  const version = updates.data.latest_version;
+                  const version = updates.data?.latest_version;
                   if (version)
                     update.mutate({
                       name: mod.name,
@@ -189,14 +190,56 @@ function InstalledModsTable({
   stopped: boolean;
   version: string | null;
 }) {
-  const checks = useQueries({
-    queries: document.mods.map((mod) => ({
-      queryKey: ["mod-updates", mod.name, mod.version, version],
-      queryFn: () => api.modUpdates(mod.name),
-      staleTime: 5 * 60 * 1000,
-      retry: false,
-      refetchOnWindowFocus: false,
-    })),
+  const client = useQueryClient();
+  const queryKey = [
+    "mod-updates",
+    document.revision,
+    version,
+    document.portal_authenticated,
+  ];
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.allModUpdates(),
+    staleTime: 10 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const checks = document.mods.map((mod) => {
+    const result = query.data?.find((check) =>
+      check.status === "ready"
+        ? check.summary.name === mod.name
+        : check.name === mod.name,
+    );
+    return {
+      data: result?.status === "ready" ? result.summary : undefined,
+      isFetching: query.isFetching,
+      isError: query.isError || result?.status === "failed",
+      error:
+        result?.status === "failed" ? new Error(result.message) : query.error,
+      refetch: async () => {
+        if (!query.data) {
+          await client.query({
+            queryKey,
+            queryFn: () => api.allModUpdates(true),
+            staleTime: 0,
+          });
+          return;
+        }
+        const summary = await api.modUpdates(mod.name, true);
+        client.setQueryData<typeof query.data>(
+          queryKey,
+          (entries) =>
+            entries?.map((check) =>
+              (check.status === "ready" ? check.summary.name : check.name) ===
+              mod.name
+                ? { status: "ready", summary }
+                : check,
+            ),
+          { updatedAt: query.dataUpdatedAt },
+        );
+      },
+    };
   });
   const outdated = checks.filter(
     (check) => check.data?.update_available,
@@ -258,9 +301,11 @@ function InstalledModsTable({
 function ModWorkflows({
   document,
   stopped,
+  serverState,
 }: {
   document: ModsDocument;
   stopped: boolean;
+  serverState: Status["state"];
 }) {
   const { canOperate } = useAccess();
   const [open, setOpen] = useState(false);
@@ -336,6 +381,19 @@ function ModWorkflows({
   const disabled = !stopped || changing;
   const version = target || releases.data?.releases[0]?.version || "";
   const installed = document.mods.find((item) => item.name === selected);
+  const installDisabledReason = !canOperate
+    ? "Operator access is required to install mods."
+    : !stopped
+      ? `Server is ${serverState}. Stop it in Overview to install mods.`
+      : changing
+        ? "Another mod change is in progress."
+        : !document.portal_authenticated
+          ? "Add your Factorio username and token in Server settings."
+          : !version
+            ? "Select a compatible version."
+            : installed?.version === version
+              ? "This version is already installed."
+              : null;
   return (
     <>
       <button
@@ -380,7 +438,7 @@ function ModWorkflows({
                 </button>
               ))}
             </div>
-            {!stopped && canOperate && (
+            {!stopped && canOperate && tab !== "portal" && (
               <p className="muted">Stop the server before making changes.</p>
             )}
             {tab === "portal" && (
@@ -482,28 +540,40 @@ function ModWorkflows({
                         ))}
                       </select>
                     </label>
-                    <button
-                      className="button primary"
-                      disabled={
-                        disabled ||
-                        !document.portal_authenticated ||
-                        !version ||
-                        installed?.version === version
-                      }
-                      onClick={() => {
-                        confirm(
-                          `Install ${selected} ${version}${installed ? ` (currently ${installed.version})` : ""}? Existing versions are retained.`,
-                          () =>
-                            modWorkflowApi.install(
-                              document.revision,
-                              selected,
-                              version,
-                            ),
-                        );
-                      }}
-                    >
-                      Install version
-                    </button>
+                    <div className="portal-install-action">
+                      <button
+                        className="button primary"
+                        disabled={installDisabledReason !== null}
+                        title={installDisabledReason ?? undefined}
+                        aria-describedby={
+                          installDisabledReason
+                            ? "portal-install-reason"
+                            : undefined
+                        }
+                        onClick={() => {
+                          confirm(
+                            `Install ${selected} ${version}${installed ? ` (currently ${installed.version})` : ""}? Required dependencies will be installed or enabled together. Existing versions are retained.`,
+                            () =>
+                              modWorkflowApi.install(
+                                document.revision,
+                                selected,
+                                version,
+                              ),
+                          );
+                        }}
+                      >
+                        Install version
+                      </button>
+                      {installDisabledReason && (
+                        <p
+                          id="portal-install-reason"
+                          className="portal-install-reason"
+                          role="status"
+                        >
+                          {installDisabledReason}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 )}
                 {selected && releases.data?.releases.length === 0 && (
@@ -1180,16 +1250,27 @@ export default function Mods({
       <div hidden={tab !== "mods"}>
         <div className="toolbar">
           {query.data && active && tab === "mods" && (
-            <ModWorkflows document={query.data} stopped={stopped} />
+            <ModWorkflows
+              document={query.data}
+              stopped={stopped}
+              serverState={status.state}
+            />
           )}
           <button
             className="button secondary"
             disabled={checking || !query.data?.mods.length}
             onClick={() => {
+              if (!query.data) return;
               client
-                .invalidateQueries({
-                  queryKey: ["mod-updates"],
-                  refetchType: "active",
+                .query({
+                  queryKey: [
+                    "mod-updates",
+                    query.data.revision,
+                    status.version,
+                    query.data.portal_authenticated,
+                  ],
+                  queryFn: () => api.allModUpdates(true),
+                  staleTime: 0,
                 })
                 .catch(() => undefined);
             }}

@@ -64,6 +64,7 @@ use utoipa::OpenApi;
         crate::mods::download_mod,
         crate::mods::set_enabled,
         crate::mods::get_updates,
+        crate::mods::get_all_updates,
         crate::mods::update_mod,
         crate::mods::get_mod_settings,
         crate::mods::put_mod_settings,

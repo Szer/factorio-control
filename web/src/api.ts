@@ -203,6 +203,15 @@ export const modUpdatesSchema = z.object({
 }) satisfies z.ZodType<components["schemas"]["ModUpdates"]>;
 export type ModUpdates = z.infer<typeof modUpdatesSchema>;
 
+export const modUpdateCheckSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("ready"), summary: modUpdatesSchema }),
+  z.object({
+    status: z.literal("failed"),
+    name: z.string(),
+    message: z.string(),
+  }),
+]) satisfies z.ZodType<components["schemas"]["ModUpdateCheck"]>;
+
 export const saveSyncPlanSchema = z.object({
   revision: z.string(),
   save: z.string(),
@@ -353,8 +362,16 @@ export const api = {
       modsSchema,
       json("PUT", { revision, enabled }),
     ),
-  modUpdates: (name: string) =>
-    request(`/api/mods/${encodeURIComponent(name)}/updates`, modUpdatesSchema),
+  allModUpdates: (refresh = false) =>
+    request(
+      `/api/mods/updates${refresh ? "?refresh=true" : ""}`,
+      z.array(modUpdateCheckSchema),
+    ),
+  modUpdates: (name: string, refresh = false) =>
+    request(
+      `/api/mods/${encodeURIComponent(name)}/updates${refresh ? "?refresh=true" : ""}`,
+      modUpdatesSchema,
+    ),
   updateMod: ({
     name,
     revision,
