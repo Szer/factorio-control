@@ -143,6 +143,17 @@ impl Runtime {
         self.players = Some(Vec::new());
     }
     fn clear_sample(&mut self) {
+        if self.sampled_at.is_some() {
+            self.history.push_back(UpsPoint {
+                timestamp: now(),
+                ups: None,
+                target_ups: None,
+                state: SampleState::Unavailable,
+            });
+            while self.history.len() > 86400 {
+                self.history.pop_front();
+            }
+        }
         self.previous = None;
         self.completed.clear();
         self.sampled_at = None;
@@ -692,6 +703,37 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn target_history_preserves_speed_changes_pause_and_session_gaps() {
+        let mut runtime = Runtime::default();
+        let instant = Instant::now();
+        runtime.accept(sample(0, false), instant, 10);
+        let mut slower = sample(120, false);
+        slower.speed = 0.7;
+        runtime.accept(slower, instant + Duration::from_secs(2), 10);
+        let mut paused = sample(120, true);
+        paused.speed = 2.0;
+        runtime.accept(paused, instant + Duration::from_secs(4), 10);
+        runtime.end();
+        runtime.accept(sample(240, false), instant + Duration::from_secs(6), 10);
+        let snapshot = runtime.snapshot(true, 2);
+        assert_eq!(snapshot.target_ups, Some(60.0));
+        assert_eq!(
+            snapshot
+                .history
+                .iter()
+                .map(|point| point.target_ups)
+                .collect::<Vec<_>>(),
+            vec![Some(60.0), Some(42.0), Some(120.0), None, Some(60.0)]
+        );
+        assert!(matches!(snapshot.history[2].state, SampleState::Paused));
+        assert!(matches!(
+            snapshot.history[3].state,
+            SampleState::Unavailable
+        ));
+        assert!(matches!(snapshot.history[4].state, SampleState::Collecting));
+    }
+
     #[test]
     fn records_join_leave_and_resets_players_across_sessions() {
         let mut runtime = Runtime::default();

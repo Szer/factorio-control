@@ -17,14 +17,32 @@ function duration(since: number, now: number): string {
         ? `${String(Math.floor(seconds / 3600))}h ${String(Math.floor((seconds % 3600) / 60))}m`
         : `${String(Math.floor(seconds / 86400))}d ${String(Math.floor((seconds % 86400) / 3600))}h`;
 }
-function UpsChart({ telemetry, now }: { telemetry: Telemetry; now: number }) {
+export function UpsChart({
+  telemetry,
+  now,
+}: {
+  telemetry: Telemetry;
+  now: number;
+}) {
   const [minutes, setMinutes] = useState(5);
   const end = now;
   const start = end - minutes * 60;
-  const samples = telemetry.history.filter((point) => point.timestamp >= start);
+  const first = telemetry.history.findIndex(
+    (point) => point.timestamp >= start,
+  );
+  const samples = telemetry.history.filter(
+    (point) => point.timestamp >= start && point.timestamp <= end,
+  );
+  const preceding = first > 0 ? telemetry.history[first - 1] : undefined;
+  const firstVisible = samples[0];
+  const targetSamples =
+    preceding && firstVisible && firstVisible.timestamp > start
+      ? [{ ...preceding, timestamp: start }, ...samples]
+      : samples;
   const max = Math.max(
     60,
-    ...samples.flatMap((point) => [point.ups ?? 0, point.target_ups ?? 0]),
+    ...samples.map((point) => point.ups ?? 0),
+    ...targetSamples.map((point) => point.target_ups ?? 0),
   );
   const width = 900,
     height = 160,
@@ -45,6 +63,23 @@ function UpsChart({ telemetry, now }: { telemetry: Telemetry; now: number }) {
     }
     path += `${move ? "M" : "L"}${x(point.timestamp).toFixed(2)},${y(point.ups).toFixed(2)} `;
     move = false;
+  }
+  let targetPath = "";
+  let previousTarget: number | null = null;
+  const targetMarkers: Telemetry["history"] = [];
+  for (const point of targetSamples) {
+    if (point.target_ups === null || point.state === "unavailable") {
+      previousTarget = null;
+      continue;
+    }
+    const position = x(point.timestamp).toFixed(2);
+    const level = y(point.target_ups).toFixed(2);
+    targetPath +=
+      previousTarget === null
+        ? `M${position},${level} `
+        : `H${position} V${level} `;
+    if (previousTarget !== point.target_ups) targetMarkers.push(point);
+    previousTarget = point.target_ups;
   }
   const values = samples.flatMap((point) =>
     point.state === "active" && point.ups !== null ? [point.ups] : [],
@@ -102,6 +137,16 @@ function UpsChart({ telemetry, now }: { telemetry: Telemetry; now: number }) {
           </strong>
         </div>
       </div>
+      <div className="chart-legend" aria-label="UPS chart legend">
+        <span>
+          <i className="legend-measured" aria-hidden="true" />
+          Measured UPS
+        </span>
+        <span>
+          <i className="legend-target" aria-hidden="true" />
+          Target UPS
+        </span>
+      </div>
       <div className="ups-chart">
         <div className="chart-axis" aria-hidden="true">
           <span>{max.toFixed(0)}</span>
@@ -125,15 +170,21 @@ function UpsChart({ telemetry, now }: { telemetry: Telemetry; now: number }) {
               />
             </g>
           ))}
-          {telemetry.target_ups !== null && (
-            <line
-              x1={left}
-              x2={width - right}
-              y1={y(telemetry.target_ups)}
-              y2={y(telemetry.target_ups)}
-              className="chart-target"
-            />
-          )}
+          <path d={targetPath} className="chart-target" />
+          {targetMarkers.map((point) => (
+            <circle
+              key={point.timestamp}
+              cx={x(point.timestamp)}
+              cy={y(point.target_ups ?? 0)}
+              r={2.5}
+              className="chart-target-point"
+            >
+              <title>
+                {formatDate(point.timestamp)} · Target{" "}
+                {point.target_ups?.toFixed(1)} UPS
+              </title>
+            </circle>
+          ))}
           <path d={path} className="chart-line" />
           {samples
             .filter((point) => point.state === "active" && point.ups !== null)
@@ -155,7 +206,7 @@ function UpsChart({ telemetry, now }: { telemetry: Telemetry; now: number }) {
           <span>{minutes} minutes ago</span>
           <span>Now</span>
         </div>
-        {values.length === 0 && (
+        {values.length === 0 && targetMarkers.length === 0 && (
           <div className="chart-empty">
             {!telemetry.enabled
               ? "Scripting telemetry is disabled"

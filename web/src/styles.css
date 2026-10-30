@@ -1593,10 +1593,34 @@ textarea::placeholder {
   stroke: #454545;
   stroke-width: 1;
 }
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 0 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.chart-legend i {
+  width: 24px;
+  border-top: 2px solid var(--accent);
+}
+.chart-legend .legend-target {
+  border-top: 2px dashed #aaa;
+}
 .chart-target {
-  stroke: #8b8b8b;
-  stroke-width: 1;
+  stroke: #aaa;
+  stroke-width: 1.5;
   stroke-dasharray: 5 5;
+  fill: none;
+}
+.chart-target-point {
+  fill: #aaa;
 }
 .chart-line {
   stroke: var(--accent);

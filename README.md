@@ -48,7 +48,7 @@ Overview shows server state and its start time, online players, research progres
 
 Detailed telemetry is opt-in: enable it in **Settings → Manager settings**. It uses Factorio script commands through private loopback RCON, which disable achievements for that save. Without it, lifecycle and player events remain available from game logs.
 
-UPS is measured from elapsed game ticks against wall-clock time, with a target adjusted for game speed. Paused or unavailable samples appear as gaps. History and activity are bounded in memory and reset when the manager restarts. Frequent research queries cover current, queued, and previously observed research. A full reconciliation every 30 seconds catches unqueued or script-triggered completions without scanning every technology on each UPS poll.
+UPS is measured from elapsed game ticks against wall-clock time, with a target adjusted for game speed. Target UPS follows recorded game speed as a stepped history line. Paused periods retain their known target; unavailable samples and separate server runs appear as gaps. History and activity are bounded in memory and reset when the manager restarts. Frequent research queries cover current, queued, and previously observed research. A full reconciliation every 30 seconds catches unqueued or script-triggered completions without scanning every technology on each UPS poll.
 
 ## Saves, mods, and settings
 
