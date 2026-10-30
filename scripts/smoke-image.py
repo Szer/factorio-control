@@ -78,6 +78,15 @@ def wait_ready():
     raise RuntimeError("Image did not become ready")
 
 
+def connect_container():
+    global port, host, origin
+    port = int(command("port", name if direct_http else proxy, "8080/tcp" if direct_http else "8081/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
+    if direct_http:
+        host = f"127.0.0.1:{port}"
+        origin = f"http://{host}"
+    wait_ready()
+
+
 def wait_state(states):
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
@@ -133,17 +142,14 @@ http.server.ThreadingHTTPServer(('0.0.0.0', 8081), Proxy).serve_forever()
         require(proxy_ip, "Isolated reverse proxy has no transport address")
     mount = volume + ":/data" + (":U" if engine[-1] == "podman" else "")
     environment = ["-e", "FC_SESSION_TTL_SECONDS=3600"] if direct_http else ["-e", "FC_PUBLIC_URL=" + origin, "-e", "FC_TRUSTED_PROXIES=" + proxy_ip]
-    command(
+    container_arguments = (
         "run", "-d", "--name", name, "--network", network, "--network-alias", "control", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
         "-p", "127.0.0.1::8080", "-p", "127.0.0.1::34197/udp",
         *environment, "--volume", mount, image,
     )
-    port = int(command("port", name if direct_http else proxy, "8080/tcp" if direct_http else "8081/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
-    if direct_http:
-        host = f"127.0.0.1:{port}"
-        origin = f"http://{host}"
-    wait_ready()
+    command(*container_arguments)
+    connect_container()
     require(request("/api/status", authenticated=False)[0] == 401, "Anonymous access was allowed")
     command("exec", name, "/app/factorio-control", "--healthcheck")
     require(command("exec", name, "id", "-u").stdout.strip() == "10001", "Image is not running as UID 10001")
@@ -191,13 +197,21 @@ http.server.ThreadingHTTPServer(('0.0.0.0', 8081), Proxy).serve_forever()
     wait_state({"stopped"})
     require(request("/api/server/start", {"save": "smoke-world.zip"})[0] == 200, "Second game start failed")
     wait_state({"running", "paused"})
+    session_before_restart = request("/api/auth/status")[2]
     command("restart", "--time", "150", name, timeout=170)
-    port = int(command("port", name if direct_http else proxy, "8080/tcp" if direct_http else "8081/tcp").stdout.strip().splitlines()[0].rsplit(":", 1)[1])
-    if direct_http:
-        host = f"127.0.0.1:{port}"
-        origin = f"http://{host}"
-    wait_ready()
-    require(request("/api/status")[0] == 401, "Session survived restart")
+    connect_container()
+    require(request("/api/status")[0] == 200, "Session did not survive restart")
+    require(request("/api/auth/status")[2] == session_before_restart, "Restart changed session identity or expiry")
+    command("rm", "--force", name)
+    command(*container_arguments)
+    connect_container()
+    require(request("/api/status")[0] == 200, "Session did not survive container recreation")
+    require(request("/api/auth/status")[2] == session_before_restart, "Container recreation changed session identity or expiry")
+    require(request("/api/auth/logout", {})[0] == 204, "Logout failed")
+    command("restart", "--time", "150", name, timeout=170)
+    connect_container()
+    require(request("/api/status")[0] == 401, "Logout was undone by restart")
+    require(command("exec", name, "sh", "-c", 'test "$(stat -c %a /data/panel-sessions.json)" = 600', check=False).returncode == 0, "Session file is not private")
     require(command("exec", name, "test", "!", "-e", "/data/bootstrap-admin.json", check=False).returncode == 0, "Restart recreated bootstrap credentials")
     require(request("/api/auth/login", {"username": "admin", "password": password}, authenticated=False)[0] == 200, "Account did not persist")
     if direct_http:
