@@ -1456,6 +1456,108 @@ mod tests {
         assert!(!journal_path(&app).exists());
         Ok(())
     }
+    #[tokio::test]
+    async fn cached_resolution_downloads_and_activates_required_mods_together()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temporary, app) = app().map_err(|e| e.message)?;
+        let root = "workflow-dependency-root";
+        let dependency = "workflow-dependency-library";
+        let mut archives = BTreeMap::new();
+        for (name, dependencies) in [
+            (root, vec!["base", "workflow-dependency-library >= 1.0"]),
+            (dependency, vec!["base"]),
+        ] {
+            let bytes = fixture(name, "1.0.0", &dependencies).map_err(|e| e.message)?;
+            release_cache::prime(
+                name,
+                vec![Release {
+                    version: "1.0.0".into(),
+                    released_at: None,
+                    download_url: "/download/fixture/archive.zip".into(),
+                    sha1: hex(&sha1::Sha1::digest(&bytes)),
+                    info_json: ReleaseInfo {
+                        factorio_version: "2.1".into(),
+                        dependencies: dependencies.iter().map(|value| (*value).into()).collect(),
+                    },
+                }],
+            )
+            .await;
+            archives.insert(name.to_owned(), bytes);
+        }
+        let server = axum::Router::new().route(
+            "/{name}",
+            get(move |Path(name): Path<String>| {
+                let bytes = archives.get(&name).cloned();
+                async move {
+                    bytes.map_or_else(
+                        || StatusCode::NOT_FOUND.into_response(),
+                        |bytes| bytes.into_response(),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, server).await });
+        let document = list(&app).map_err(|e| e.message)?;
+        let revision = document.revision.clone();
+        let progress = ProgressGuard::new(&app, 1).map_err(|e| e.message)?;
+        let client = reqwest::Client::new();
+        let plan = resolver::resolve(
+            &client,
+            &document,
+            ModList::default(),
+            &[(root.into(), "1.0.0".into())],
+            &BTreeMap::new(),
+            "2.1.24",
+            &progress,
+        )
+        .await
+        .map_err(|e| e.message)?;
+        assert_eq!(plan.downloads.len(), 2);
+        let staging = tempfile::tempdir_in(&app.directory)?;
+        let mut staged = Vec::new();
+        for (name, release) in plan.downloads {
+            let response = client
+                .get(format!("http://{address}/{name}"))
+                .send()
+                .await?;
+            let file = download_response(response, release, name.clone(), app.directory.clone())
+                .await
+                .map_err(|e| e.message)?;
+            let destination = staging.path().join(format!("{name}.zip"));
+            let pair = blocking(move || {
+                let (info, _) = archive_info(file.path())?;
+                copy_archive(file.path(), &destination)?;
+                Ok((info, destination))
+            })
+            .await
+            .map_err(|e| e.message)?;
+            staged.push(pair);
+        }
+        let result = blocking(move || {
+            let _staging = staging;
+            commit_plan(&app, &revision, &staged, "2.1.24", Some(plan.activation))
+        })
+        .await
+        .map_err(|e| e.message)?;
+        assert_eq!(result.mods.len(), 2);
+        assert!(
+            result
+                .mods
+                .iter()
+                .any(|item| item.name == root && item.enabled)
+        );
+        assert!(
+            result
+                .mods
+                .iter()
+                .any(|item| item.name == dependency && item.enabled)
+        );
+        progress.complete().map_err(|e| e.message)?;
+        server.abort();
+        Ok(())
+    }
     #[test]
     fn resolved_activation_enables_local_dependency_and_commits_new_mod_together() -> Result<()> {
         let (_directory, app) = app()?;
